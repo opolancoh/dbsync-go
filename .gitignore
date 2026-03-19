@@ -1,0 +1,15 @@
+# Binaries
+bin/
+
+# Backup data
+backups/
+
+# Go
+*.exe
+*.test
+*.out
+vendor/
+
+# OS
+.DS_Store
+Thumbs.db

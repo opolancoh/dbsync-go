@@ -1,0 +1,8 @@
+source:
+  engine: postgres
+
+output:
+  directory: ./backups
+
+ignored_tables:
+  - audit_logs
