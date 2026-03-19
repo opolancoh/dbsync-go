@@ -84,15 +84,19 @@ func hostFromConn(connString string) (string, error) {
 }
 
 func newAdapter(ctx context.Context, cfg *config.Config) (adapters.DBAdapter, error) {
-	switch cfg.Source.Engine {
+	return newAdapterFromConn(ctx, cfg.Source.Engine, cfg.SourceConn)
+}
+
+func newAdapterFromConn(ctx context.Context, engine, connString string) (adapters.DBAdapter, error) {
+	switch engine {
 	case "postgres":
-		adapter, err := adapters.NewPostgresAdapter(ctx, cfg.SourceConn)
+		adapter, err := adapters.NewPostgresAdapter(ctx, connString)
 		if err != nil {
 			return nil, fmt.Errorf("connecting to database: %w", err)
 		}
 		return adapter, nil
 	default:
-		fmt.Fprintf(os.Stderr, "unsupported engine: %s\n", cfg.Source.Engine)
+		fmt.Fprintf(os.Stderr, "unsupported engine: %s\n", engine)
 		os.Exit(1)
 		return nil, nil
 	}

@@ -15,6 +15,7 @@ var rootCmd = &cobra.Command{
 func main() {
 	rootCmd.AddCommand(inspectCmd)
 	rootCmd.AddCommand(backupCmd)
+	rootCmd.AddCommand(analyzeCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

@@ -1,0 +1,178 @@
+package analyze
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/opolancoh/dbsync/internal/adapters"
+	"github.com/opolancoh/dbsync/internal/inspect"
+	"gopkg.in/yaml.v3"
+)
+
+const (
+	StatusMatched   = "matched"
+	StatusUnmatched = "unmatched"
+)
+
+type FieldMapping struct {
+	Source     string  `yaml:"source"`
+	Target     *string `yaml:"target"`
+	SourceType string  `yaml:"source_type"`
+	TargetType *string `yaml:"target_type"`
+	Status     string  `yaml:"status"`
+}
+
+type TableMapping struct {
+	Source string         `yaml:"source"`
+	Target *string        `yaml:"target"`
+	Status string         `yaml:"status"`
+	Fields []FieldMapping `yaml:"fields"`
+}
+
+type Mapping struct {
+	AnalyzedAt string         `yaml:"analyzed_at"`
+	Tables     []TableMapping `yaml:"tables"`
+}
+
+func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema, backupDir string) (*Mapping, error) {
+	targetTables, err := adapter.ListTables(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing target tables: %w", err)
+	}
+
+	targetTableSet := make(map[string]bool, len(targetTables))
+	for _, t := range targetTables {
+		targetTableSet[t] = true
+	}
+
+	targetColumns := make(map[string][]adapters.Column)
+	for _, t := range targetTables {
+		cols, err := adapter.DescribeTable(ctx, t)
+		if err != nil {
+			return nil, fmt.Errorf("describing target table %s: %w", t, err)
+		}
+		targetColumns[t] = cols
+	}
+
+	mapping := &Mapping{
+		AnalyzedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	for _, sourceTable := range schema.Tables {
+		tableMapping := TableMapping{
+			Source: sourceTable.Name,
+		}
+
+		if !targetTableSet[sourceTable.Name] {
+			tableMapping.Status = StatusUnmatched
+			tableMapping.Target = nil
+			mapping.Tables = append(mapping.Tables, tableMapping)
+			continue
+		}
+
+		targetName := sourceTable.Name
+		tableMapping.Target = &targetName
+		tableMapping.Status = StatusMatched
+
+		targetColMap := make(map[string]adapters.Column)
+		for _, col := range targetColumns[sourceTable.Name] {
+			targetColMap[col.Name] = col
+		}
+
+		for _, sourceField := range sourceTable.Fields {
+			fieldMapping := FieldMapping{
+				Source:     sourceField.Name,
+				SourceType: sourceField.Type,
+			}
+
+			targetCol, found := targetColMap[sourceField.Name]
+			if !found {
+				fieldMapping.Status = StatusUnmatched
+				fieldMapping.Target = nil
+				fieldMapping.TargetType = nil
+				tableMapping.Status = StatusUnmatched
+			} else {
+				fieldMapping.Target = &targetCol.Name
+				fieldMapping.TargetType = &targetCol.Type
+				if sourceField.Type == targetCol.Type {
+					fieldMapping.Status = StatusMatched
+				} else {
+					fieldMapping.Status = StatusUnmatched
+					tableMapping.Status = StatusUnmatched
+				}
+			}
+
+			tableMapping.Fields = append(tableMapping.Fields, fieldMapping)
+		}
+
+		mapping.Tables = append(mapping.Tables, tableMapping)
+	}
+
+	if err := save(mapping, backupDir); err != nil {
+		return nil, err
+	}
+
+	return mapping, nil
+}
+
+func Print(mapping *Mapping, backupDir string) {
+	matched, unmatched := 0, 0
+	for _, t := range mapping.Tables {
+		if t.Status == StatusMatched {
+			matched++
+		} else {
+			unmatched++
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("Analysis Summary")
+	fmt.Println("─────────────────────────────────────────────────────")
+	fmt.Printf("  Analyzed at:       %s\n", mapping.AnalyzedAt)
+	fmt.Printf("  Tables matched:    %d\n", matched)
+	fmt.Printf("  Tables unmatched:  %d\n\n", unmatched)
+
+	for _, t := range mapping.Tables {
+		targetName := "(unmatched)"
+		if t.Target != nil {
+			targetName = *t.Target
+		}
+		status := "✓"
+		if t.Status == StatusUnmatched {
+			status = "✗"
+		}
+		fmt.Printf("  %s %-30s → %s\n", status, t.Source, targetName)
+
+		for _, f := range t.Fields {
+			if f.Status == StatusUnmatched {
+				targetField := "not found in target"
+				if f.Target != nil {
+					targetField = fmt.Sprintf("type mismatch: %s → %s", f.SourceType, *f.TargetType)
+				}
+				fmt.Printf("      ✗ %-28s %s\n", f.Source, targetField)
+			}
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("─────────────────────────────────────────────────────")
+	fmt.Printf("  Mapping saved to: %s\n", filepath.Join(backupDir, "mapping.yaml"))
+	fmt.Println("─────────────────────────────────────────────────────")
+}
+
+func save(mapping *Mapping, backupDir string) error {
+	data, err := yaml.Marshal(mapping)
+	if err != nil {
+		return fmt.Errorf("marshaling mapping: %w", err)
+	}
+
+	path := filepath.Join(backupDir, "mapping.yaml")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("writing mapping.yaml: %w", err)
+	}
+
+	return nil
+}
