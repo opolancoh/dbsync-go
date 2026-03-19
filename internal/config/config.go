@@ -48,8 +48,22 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-func (c *Config) Print(host, dbName string) {
-	fmt.Println("Configuration")
+func (c *Config) Validate(requireSource, requireTarget bool) error {
+	var errs []string
+	if requireSource && c.SourceConn == "" {
+		errs = append(errs, "DBSYNC_SOURCE_CONN environment variable is not set")
+	}
+	if requireTarget && c.TargetConn == "" {
+		errs = append(errs, "DBSYNC_TARGET_CONN environment variable is not set")
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "\n"))
+	}
+	return nil
+}
+
+func (c *Config) Print(host, dbName string, extras ...string) {
+	fmt.Println("Parameters")
 	fmt.Println("─────────────────────────────────────────────────────")
 	fmt.Printf("  Engine:         %s\n", c.Source.Engine)
 	fmt.Printf("  Host:           %s\n", host)
@@ -58,20 +72,9 @@ func (c *Config) Print(host, dbName string) {
 	if len(c.IgnoredTables) > 0 {
 		fmt.Printf("  Ignored tables: %s\n", strings.Join(c.IgnoredTables, ", "))
 	}
+	for i := 0; i+1 < len(extras); i += 2 {
+		fmt.Printf("  %-16s%s\n", extras[i]+":", extras[i+1])
+	}
 	fmt.Println("─────────────────────────────────────────────────────")
 	fmt.Println()
-}
-
-func (c *Config) RequireSourceConn() error {
-	if c.SourceConn == "" {
-		return fmt.Errorf("DBSYNC_SOURCE_CONN environment variable is not set")
-	}
-	return nil
-}
-
-func (c *Config) RequireTargetConn() error {
-	if c.TargetConn == "" {
-		return fmt.Errorf("DBSYNC_TARGET_CONN environment variable is not set")
-	}
-	return nil
 }

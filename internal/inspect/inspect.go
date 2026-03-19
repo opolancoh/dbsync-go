@@ -123,3 +123,17 @@ func save(schema *Schema, outputDir string) error {
 func OutputPath(outputDir string) string {
 	return filepath.Join(outputDir, "schema.yaml")
 }
+
+func LoadSchema(backupDir string) (*Schema, error) {
+	data, err := os.ReadFile(filepath.Join(backupDir, "schema.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("reading schema.yaml: %w", err)
+	}
+
+	var schema Schema
+	if err := yaml.Unmarshal(data, &schema); err != nil {
+		return nil, fmt.Errorf("parsing schema.yaml: %w", err)
+	}
+
+	return &schema, nil
+}

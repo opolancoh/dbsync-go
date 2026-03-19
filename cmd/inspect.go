@@ -33,7 +33,7 @@ func runInspect(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-	if err := cfg.RequireSourceConn(); err != nil {
+	if err := cfg.Validate(true, false); err != nil {
 		return err
 	}
 
