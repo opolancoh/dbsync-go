@@ -29,6 +29,8 @@ type TableMapping struct {
 	Source string         `yaml:"source"`
 	Target *string        `yaml:"target"`
 	Status string         `yaml:"status"`
+	Skip   bool           `yaml:"skip"`
+	Order  int            `yaml:"order"`
 	Fields []FieldMapping `yaml:"fields"`
 }
 
@@ -37,7 +39,11 @@ type Mapping struct {
 	Tables     []TableMapping `yaml:"tables"`
 }
 
-func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema, backupDir string) (*Mapping, error) {
+func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema, backupDir string, skippedTables []string) (*Mapping, error) {
+	skippedSet := make(map[string]bool, len(skippedTables))
+	for _, t := range skippedTables {
+		skippedSet[t] = true
+	}
 	targetTables, err := adapter.ListTables(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("listing target tables: %w", err)
@@ -61,10 +67,17 @@ func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema
 		AnalyzedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
+	order := 1
 	for _, sourceTable := range schema.Tables {
+		if skippedSet[sourceTable.Name] {
+			continue
+		}
+
 		tableMapping := TableMapping{
 			Source: sourceTable.Name,
+			Order:  order,
 		}
+		order++
 
 		if !targetTableSet[sourceTable.Name] {
 			tableMapping.Status = StatusUnmatched
@@ -144,7 +157,7 @@ func Print(mapping *Mapping, backupDir string) {
 		if t.Status == StatusUnmatched {
 			status = "✗"
 		}
-		fmt.Printf("  %s %-30s → %s\n", status, t.Source, targetName)
+		fmt.Printf("  %s [%2d] %-30s → %s\n", status, t.Order, t.Source, targetName)
 
 		for _, f := range t.Fields {
 			if f.Status == StatusUnmatched {

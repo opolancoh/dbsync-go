@@ -13,5 +13,6 @@ type DBAdapter interface {
 	DescribeTable(ctx context.Context, table string) ([]Column, error)
 	ExportTable(ctx context.Context, table string, fn func(row map[string]any) error) error
 	InsertRows(ctx context.Context, table string, rows []map[string]any) error
+	TruncateTable(ctx context.Context, table string) error
 	Close(ctx context.Context) error
 }

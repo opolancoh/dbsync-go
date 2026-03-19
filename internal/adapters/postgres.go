@@ -3,6 +3,8 @@ package adapters
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -86,7 +88,7 @@ func (a *PostgresAdapter) ExportTable(ctx context.Context, table string, fn func
 		}
 		row := make(map[string]any, len(fields))
 		for i, f := range fields {
-			row[string(f.Name)] = values[i]
+			row[string(f.Name)] = normalizeValue(values[i])
 		}
 		if err := fn(row); err != nil {
 			return err
@@ -95,9 +97,75 @@ func (a *PostgresAdapter) ExportTable(ctx context.Context, table string, fn func
 	return rows.Err()
 }
 
+func normalizeValue(v any) any {
+	switch val := v.(type) {
+	case [16]byte:
+		return fmt.Sprintf("%x-%x-%x-%x-%x", val[0:4], val[4:6], val[6:8], val[8:10], val[10:16])
+	default:
+		return v
+	}
+}
+
+func normalizeInsertValue(v any) any {
+	arr, ok := v.([]interface{})
+	if !ok || len(arr) != 16 {
+		return v
+	}
+	b := make([]byte, 16)
+	for i, elem := range arr {
+		f, ok := elem.(float64)
+		if !ok || f < 0 || f > 255 {
+			return v
+		}
+		b[i] = byte(f)
+	}
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 func (a *PostgresAdapter) InsertRows(ctx context.Context, table string, rows []map[string]any) error {
-	// implemented in restore step
-	return fmt.Errorf("not implemented")
+	if len(rows) == 0 {
+		return nil
+	}
+
+	cols := make([]string, 0, len(rows[0]))
+	for k := range rows[0] {
+		cols = append(cols, k)
+	}
+	sort.Strings(cols)
+
+	colIdents := make([]string, len(cols))
+	placeholders := make([]string, len(cols))
+	for i, col := range cols {
+		colIdents[i] = fmt.Sprintf("%q", col)
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+	}
+	sql := fmt.Sprintf("INSERT INTO %q (%s) VALUES (%s)",
+		table,
+		strings.Join(colIdents, ", "),
+		strings.Join(placeholders, ", "))
+
+	batch := &pgx.Batch{}
+	for _, row := range rows {
+		vals := make([]any, len(cols))
+		for i, col := range cols {
+			vals[i] = normalizeInsertValue(row[col])
+		}
+		batch.Queue(sql, vals...)
+	}
+
+	br := a.conn.SendBatch(ctx, batch)
+	defer br.Close()
+	for range rows {
+		if _, err := br.Exec(); err != nil {
+			return err
+		}
+	}
+	return br.Close()
+}
+
+func (a *PostgresAdapter) TruncateTable(ctx context.Context, table string) error {
+	_, err := a.conn.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %q CASCADE", table))
+	return err
 }
 
 func (a *PostgresAdapter) Close(ctx context.Context) error {

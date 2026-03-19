@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/opolancoh/dbsync/internal/analyze"
+	"github.com/opolancoh/dbsync/internal/backup"
 	"github.com/opolancoh/dbsync/internal/config"
 	"github.com/opolancoh/dbsync/internal/inspect"
 	"github.com/spf13/cobra"
@@ -74,7 +76,17 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 	}
 	defer targetAdapter.Close(ctx)
 
-	mapping, err := analyze.Run(ctx, targetAdapter, schema, analyzeBackupDir)
+	var skippedTables []string
+	manifestPath := analyzeBackupDir + "/backup-summary.yaml"
+	if _, err := os.Stat(manifestPath); err == nil {
+		manifest, err := backup.LoadSummary(analyzeBackupDir)
+		if err != nil {
+			return fmt.Errorf("loading backup-summary.yaml: %w", err)
+		}
+		skippedTables = manifest.SkippedTables
+	}
+
+	mapping, err := analyze.Run(ctx, targetAdapter, schema, analyzeBackupDir, skippedTables)
 	if err != nil {
 		return fmt.Errorf("analyze failed: %w", err)
 	}

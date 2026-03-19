@@ -19,7 +19,7 @@ type TableEntry struct {
 	File string `yaml:"file"`
 }
 
-type Manifest struct {
+type Summary struct {
 	CreatedAt     string       `yaml:"created_at"`
 	Engine        string       `yaml:"engine"`
 	Host          string       `yaml:"host"`
@@ -28,8 +28,20 @@ type Manifest struct {
 	SkippedTables []string     `yaml:"skipped_tables,omitempty"`
 }
 
-func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema, backupDir string) (*Manifest, error) {
-	manifest := &Manifest{
+func LoadSummary(backupDir string) (*Summary, error) {
+	data, err := os.ReadFile(filepath.Join(backupDir, "backup-summary.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("reading backup-summary.yaml: %w", err)
+	}
+	var manifest Summary
+	if err := yaml.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("parsing backup-summary.yaml: %w", err)
+	}
+	return &manifest, nil
+}
+
+func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema, backupDir string) (*Summary, error) {
+	manifest := &Summary{
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		Engine:    schema.Engine,
 		Host:      schema.Host,
@@ -59,7 +71,7 @@ func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema
 		fmt.Printf("  ✓ %s — %d rows\n\n", table.Name, rows)
 	}
 
-	if err := saveManifest(manifest, backupDir); err != nil {
+	if err := saveSummary(manifest, backupDir); err != nil {
 		return nil, err
 	}
 
@@ -95,7 +107,7 @@ func exportTable(ctx context.Context, adapter adapters.DBAdapter, table, backupD
 	return count, err
 }
 
-func saveManifest(manifest *Manifest, backupDir string) error {
+func saveSummary(manifest *Summary, backupDir string) error {
 	data, err := yaml.Marshal(manifest)
 	if err != nil {
 		return fmt.Errorf("marshaling manifest: %w", err)
@@ -109,7 +121,7 @@ func saveManifest(manifest *Manifest, backupDir string) error {
 	return nil
 }
 
-func Print(manifest *Manifest, backupDir string) {
+func Print(manifest *Summary, backupDir string) {
 	totalRows := 0
 	for _, t := range manifest.Tables {
 		totalRows += t.Rows
