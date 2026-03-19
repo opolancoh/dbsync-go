@@ -29,6 +29,8 @@ func init() {
 }
 
 func runInspect(cmd *cobra.Command, args []string) error {
+	printStep(1)
+
 	cfg, err := config.Load(inspectConfigPath)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)

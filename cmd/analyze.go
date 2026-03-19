@@ -31,6 +31,8 @@ func init() {
 }
 
 func runAnalyze(cmd *cobra.Command, args []string) error {
+	printStep(3)
+
 	cfg, err := config.Load(analyzeConfigPath)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)

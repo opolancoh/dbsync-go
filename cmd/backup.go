@@ -29,6 +29,8 @@ func init() {
 }
 
 func runBackup(cmd *cobra.Command, args []string) error {
+	printStep(2)
+
 	cfg, err := config.Load(backupConfigPath)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)

@@ -16,7 +16,7 @@ func main() {
 	rootCmd.AddCommand(inspectCmd)
 	rootCmd.AddCommand(backupCmd)
 	rootCmd.AddCommand(analyzeCmd)
-	rootCmd.AddCommand(restoreCmd)
+	rootCmd.AddCommand(transferCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

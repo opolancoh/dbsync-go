@@ -5,6 +5,14 @@ import (
 	"os"
 )
 
+var stepNames = []string{"Inspect", "Backup", "Analyze", "Transfer"}
+
+func printStep(step int) {
+	fmt.Printf("Step %d of %d: %s\n", step, len(stepNames), stepNames[step-1])
+	fmt.Println("─────────────────────────────────────────────────────")
+	fmt.Println()
+}
+
 func validateDir(path, label string) error {
 	info, err := os.Stat(path)
 	if err != nil {

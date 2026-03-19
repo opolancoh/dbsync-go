@@ -157,7 +157,7 @@ func Print(mapping *Mapping, backupDir string) {
 		if t.Status == StatusUnmatched {
 			status = "✗"
 		}
-		fmt.Printf("  %s [%2d] %-30s → %s\n", status, t.Order, t.Source, targetName)
+		fmt.Printf("  %s [%-2d] %-30s → %s\n", status, t.Order, t.Source, targetName)
 
 		for _, f := range t.Fields {
 			if f.Status == StatusUnmatched {
