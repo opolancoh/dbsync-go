@@ -29,13 +29,13 @@ type Summary struct {
 }
 
 func LoadSummary(backupDir string) (*Summary, error) {
-	data, err := os.ReadFile(filepath.Join(backupDir, "backup-summary.yaml"))
+	data, err := os.ReadFile(filepath.Join(backupDir, "backup-manifest.yaml"))
 	if err != nil {
-		return nil, fmt.Errorf("reading backup-summary.yaml: %w", err)
+		return nil, fmt.Errorf("reading backup-manifest.yaml: %w", err)
 	}
 	var manifest Summary
 	if err := yaml.Unmarshal(data, &manifest); err != nil {
-		return nil, fmt.Errorf("parsing backup-summary.yaml: %w", err)
+		return nil, fmt.Errorf("parsing backup-manifest.yaml: %w", err)
 	}
 	return &manifest, nil
 }
@@ -113,9 +113,9 @@ func saveSummary(manifest *Summary, backupDir string) error {
 		return fmt.Errorf("marshaling manifest: %w", err)
 	}
 
-	path := filepath.Join(backupDir, "backup-summary.yaml")
+	path := filepath.Join(backupDir, "backup-manifest.yaml")
 	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("writing backup-summary.yaml: %w", err)
+		return fmt.Errorf("writing backup-manifest.yaml: %w", err)
 	}
 
 	return nil
@@ -145,6 +145,6 @@ func Print(manifest *Summary, backupDir string) {
 	}
 	fmt.Println()
 	fmt.Println("─────────────────────────────────────────────────────")
-	fmt.Printf("  Saved to: %s\n", filepath.Join(backupDir, "backup-summary.yaml"))
+	fmt.Printf("  Saved to: %s\n", filepath.Join(backupDir, "backup-manifest.yaml"))
 	fmt.Println("─────────────────────────────────────────────────────")
 }

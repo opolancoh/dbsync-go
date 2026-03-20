@@ -79,11 +79,11 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 	defer targetAdapter.Close(ctx)
 
 	var skippedTables []string
-	manifestPath := analyzeBackupDir + "/backup-summary.yaml"
+	manifestPath := analyzeBackupDir + "/backup-manifest.yaml"
 	if _, err := os.Stat(manifestPath); err == nil {
 		manifest, err := backup.LoadSummary(analyzeBackupDir)
 		if err != nil {
-			return fmt.Errorf("loading backup-summary.yaml: %w", err)
+			return fmt.Errorf("loading backup-manifest.yaml: %w", err)
 		}
 		skippedTables = manifest.SkippedTables
 	}

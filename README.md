@@ -1,86 +1,45 @@
 # dbsync
 
-CLI tool to export data from a relational database and transfer it into a target database that may have a different schema.
+CLI tool to export data from a database and transfer it into a target database. Designed to handle schema differences between source and target, making it suitable for data migrations.
 
 ---
 
 ## How it works
 
-Four sequential commands, each producing output files that feed into the next step:
+dbsync copies **records** from tables in a source database into a target database.
+
+The workflow is four sequential steps, each producing output files that feed into the next:
 
 ```
 inspect  →  backup  →  analyze  →  transfer
 ```
 
-| Step       | What it does                                                     | Output                                  |
-|------------|------------------------------------------------------------------|-----------------------------------------|
-| `inspect`  | Reads the source DB schema and saves a snapshot                  | `schema.yaml`                           |
-| `backup`   | Exports all table data to NDJSON files                           | `backup-summary.yaml` + `.ndjson` files |
-| `analyze`  | Compares source schema against target DB and produces a mapping  | `mapping.yaml`                          |
-| `transfer` | Copies data into the target DB using the mapping                 | —                                       |
+| Step       | What it does                                                    | Output                                  |
+|------------|-----------------------------------------------------------------|-----------------------------------------|
+| `inspect`  | Reads table names, column names, types and nullability          | `schema.yaml`                           |
+| `backup`   | Backs up all rows from each table into a dedicated NDJSON file  | `backup-manifest.yaml` (row counts + skipped tables) + `.ndjson` files |
+| `analyze`  | Compares source schema against target DB and produces a mapping | `mapping.yaml`                          |
+| `transfer` | Copies rows into the target DB tables using the mapping         | —                                       |
 
 ---
 
-## Building
+## Prerequisites
 
-Requires [Go 1.21+](https://golang.org/dl/).
+### 1. Get the binary
 
-All commands below must be run from the root of the repository.
-
-```bash
-# Install dependencies
-go mod tidy
-
-# Build the binary
-go build -o bin/dbsync ./cmd
-
-# Build for a specific platform
-GOOS=linux   GOARCH=amd64 go build -o bin/dbsync-linux  ./cmd  # Linux 64-bit
-GOOS=darwin  GOARCH=arm64 go build -o bin/dbsync-mac    ./cmd  # macOS Apple Silicon
-GOOS=windows GOARCH=amd64 go build -o bin/dbsync.exe    ./cmd  # Windows 64-bit
-```
-
-The binary is output to `bin/`, which is gitignored — binaries are never committed to the repo.
-
-To make the binary available system-wide:
-
-```bash
-mv bin/dbsync /usr/local/bin/dbsync
-```
-
----
-
-## Running on another machine
-
-No source code or Go installation is needed. Copy the binary and a `config.yaml` to the same folder on the target machine:
+Download the binary for your platform from the releases page, or ask a developer to provide one. Place it in any folder:
 
 ```
 some-folder/
-  dbsync        ← binary built for the target platform
-  config.yaml   ← tool configuration
+  dbsync        ← binary compiled for the target platform
+  config.yaml   ← tool configuration (see below)
 ```
 
-Set the required environment variables and run:
+To build from source, see the [Building](#building) section.
 
-```bash
-# macOS / Linux
-export DBSYNC_SOURCE_CONN="postgres://user:password@host:5432/dbname"
-./dbsync inspect --config ./config.yaml
+### 2. Create `config.yaml`
 
-# Windows
-set DBSYNC_SOURCE_CONN=postgres://user:password@host:5432/dbname
-dbsync.exe inspect --config ./config.yaml
-```
-
-Make sure to build the binary for the correct platform before copying (see build commands above).
-
----
-
-## Configuration
-
-### `config.yaml`
-
-Create a `config.yaml` from the provided example:
+Copy the provided example and edit it:
 
 ```bash
 cp config.yaml.example config.yaml
@@ -97,29 +56,16 @@ ignored_tables:
   - audit_logs
 ```
 
-`ignored_tables` lists tables that are skipped in every step. This file contains no credentials and is safe to commit.
+`ignored_tables` lists tables excluded during `inspect`. Since they never appear in `schema.yaml`, they are absent from all subsequent steps automatically.
 
-### Environment variables
+### 3. Connection strings
 
-Connection strings are sensitive and must be set as environment variables — never in `config.yaml`.
+Connection strings are passed inline with each command as environment variables:
 
 | Variable             | Required for              | Description                          |
 |----------------------|---------------------------|--------------------------------------|
 | `DBSYNC_SOURCE_CONN` | `inspect`, `backup`       | Connection string for the source DB  |
 | `DBSYNC_TARGET_CONN` | `analyze`, `transfer`     | Connection string for the target DB  |
-
-Set them in the system:
-
-```bash
-export DBSYNC_SOURCE_CONN="postgres://user:password@host:5432/dbname"
-export DBSYNC_TARGET_CONN="postgres://user:password@target-host:5432/target-dbname"
-```
-
-Or inline per command:
-
-```bash
-DBSYNC_SOURCE_CONN="postgres://user:password@host:5432/dbname" ./dbsync inspect --config ./config.yaml
-```
 
 ---
 
@@ -142,46 +88,13 @@ backups/
     schema.yaml
 ```
 
-**Output printed to screen:**
-
-```
-Step 1 of 4: Inspect
-─────────────────────────────────────────────────────
-
-Parameters
-─────────────────────────────────────────────────────
-  Engine:           postgres
-  Host:             192.168.1.100:5432
-  Database:         spenbify
-  Output dir:       ./backups
-  Ignored tables:   audit_logs
-─────────────────────────────────────────────────────
-
-Results
-─────────────────────────────────────────────────────
-  Captured at:  2026-03-19T02:00:00Z
-  Tables found: 15
-
-  Tenants (4 fields)
-    Id                             uuid                 not null
-    Name                           text                 not null
-    CreatedAt                      timestamp with time zone  not null
-    UpdatedAt                      timestamp with time zone  nullable
-
-  ...
-
-─────────────────────────────────────────────────────
-  Schema saved to: ./backups/spenbify_2026-03-19T02-00-00Z/schema.yaml
-─────────────────────────────────────────────────────
-```
-
 Review `schema.yaml` to confirm all expected tables and fields are present before running `backup`.
 
 ---
 
 ## Step 2 — Backup
 
-Reads `schema.yaml` from the inspect output and exports every table's data to a separate NDJSON file (one JSON object per line). Tables with no rows are skipped — no empty files are created. A `backup-summary.yaml` is saved with row counts and a list of skipped tables.
+Reads `schema.yaml` from the inspect output and exports every table's data to a separate NDJSON file (one JSON object per line). Tables with no rows are skipped — no empty files are created. A `backup-manifest.yaml` is saved recording row counts and skipped tables per table. It is used by the `analyze` step to automatically exclude empty tables from the mapping.
 
 This step requires a prior `inspect` run. The `--backup` flag must point to the directory created by `inspect`.
 
@@ -196,60 +109,14 @@ DBSYNC_SOURCE_CONN="postgres://user:password@host:5432/dbname" \
 backups/
   spenbify_2026-03-19T02-00-00Z/
     schema.yaml
-    backup-summary.yaml
+    backup-manifest.yaml
     Tenants.ndjson
     AspNetUsers.ndjson
     Expenses.ndjson
     ...
 ```
 
-**Output printed to screen:**
-
-```
-Step 2 of 4: Backup
-─────────────────────────────────────────────────────
-
-Parameters
-─────────────────────────────────────────────────────
-  Engine:     postgres
-  Host:       192.168.1.100:5432
-  Database:   spenbify
-  Schema:     ./backups/spenbify_2026-03-19T02-00-00Z/schema.yaml
-─────────────────────────────────────────────────────
-
-Exporting tables...
-
-  Exporting Tenants...
-  ✓ Tenants — 2 rows
-
-  Exporting Expenses...
-  ✓ Expenses — 4821 rows
-
-  Exporting AspNetRoleClaims...
-  - AspNetRoleClaims — no rows, skipped
-
-
-Backup Summary
-─────────────────────────────────────────────────────
-  Created at:   2026-03-19T02:05:00Z
-  Tables:       13
-  Total rows:   5103
-
-    Tenants                                  2 rows
-    AspNetUsers                              12 rows
-    Expenses                                 4821 rows
-    ...
-
-  Skipped (no rows):
-    AspNetRoleClaims
-    AspNetUserClaims
-
-─────────────────────────────────────────────────────
-  Saved to: ./backups/spenbify_2026-03-19T02-00-00Z/backup-summary.yaml
-─────────────────────────────────────────────────────
-```
-
-Review `backup-summary.yaml` to confirm all expected tables and row counts are present before proceeding.
+Review `backup-manifest.yaml` to confirm all expected tables and row counts are present before proceeding.
 
 ---
 
@@ -257,43 +124,13 @@ Review `backup-summary.yaml` to confirm all expected tables and row counts are p
 
 Connects to the **target** database, reads its schema, and compares it against `schema.yaml` from the backup. For each source table and field, it checks whether a matching table/field exists in the target with the same name and type.
 
-The result is saved as `mapping.yaml` inside the backup directory. This file is the input for the `transfer` step and is designed to be reviewed and edited before proceeding. Tables that had no rows (listed in `backup-summary.yaml`) are excluded from the mapping automatically.
+The result is saved as `mapping.yaml` inside the backup directory. This file is the input for the `transfer` step and is designed to be reviewed and edited before proceeding. Tables that had no rows (listed in `backup-manifest.yaml`) are excluded from the mapping automatically.
 
-This step requires `DBSYNC_TARGET_CONN` and a prior `backup` run.
+This step requires a prior `backup` run.
 
 ```bash
 DBSYNC_TARGET_CONN="postgres://user:password@target-host:5432/target-dbname" \
 ./dbsync analyze --config ./config.yaml --backup ./backups/spenbify_2026-03-19T02-00-00Z
-```
-
-**Output printed to screen:**
-
-```
-Step 3 of 4: Analyze
-─────────────────────────────────────────────────────
-
-Parameters
-─────────────────────────────────────────────────────
-  Target engine:    postgres
-  Target host:      192.168.1.100:5432
-  Target database:  spenbify_v2
-  Schema:           ./backups/spenbify_2026-03-19T02-00-00Z/schema.yaml
-─────────────────────────────────────────────────────
-
-Analysis Summary
-─────────────────────────────────────────────────────
-  Analyzed at:       2026-03-19T03:00:00Z
-  Tables matched:    13
-  Tables unmatched:  0
-
-  ✓ [ 1] Tenants                        → Tenants
-  ✓ [ 2] AspNetRoles                    → AspNetRoles
-  ✓ [ 3] AspNetUsers                    → AspNetUsers
-  ...
-
-─────────────────────────────────────────────────────
-  Mapping saved to: ./backups/spenbify_2026-03-19T02-00-00Z/mapping.yaml
-─────────────────────────────────────────────────────
 ```
 
 **Editing `mapping.yaml` before transfer:**
@@ -362,53 +199,33 @@ DBSYNC_TARGET_CONN="..." \
 | `--no-interrupt` | `false` | Continue transferring remaining tables if one fails              |
 | `--truncate`     | `false` | Delete all existing rows from each target table before inserting |
 
-**Output printed to screen:**
+---
 
+## Building
+
+Requires [Go 1.21+](https://golang.org/dl/).
+
+All commands below must be run from the root of the repository.
+
+```bash
+# Install dependencies
+go mod tidy
+
+# Build the binary
+go build -o bin/dbsync ./cmd
+
+# Build for a specific platform
+GOOS=linux   GOARCH=amd64 go build -o bin/dbsync-linux  ./cmd  # Linux 64-bit
+GOOS=darwin  GOARCH=arm64 go build -o bin/dbsync-mac    ./cmd  # macOS Apple Silicon
+GOOS=windows GOARCH=amd64 go build -o bin/dbsync.exe    ./cmd  # Windows 64-bit
 ```
-Step 4 of 4: Transfer
-─────────────────────────────────────────────────────
 
-Parameters
-─────────────────────────────────────────────────────
-  Target engine:    postgres
-  Target host:      192.168.1.100:5432
-  Target database:  spenbify_v2
-  Backup:           ./backups/spenbify_2026-03-19T02-00-00Z
-  Chunk size:       500
-  No-interrupt:     false
-─────────────────────────────────────────────────────
+The binary is output to `bin/`, which is gitignored — binaries are never committed to the repo.
 
-Transfer Plan
-─────────────────────────────────────────────────────
-  Tables to transfer (12):
-    [ 1] Tenants
-    [ 2] AspNetRoles
-    [ 3] AspNetUsers
-    [ 4] Expenses
-    ...
+To make the binary available system-wide:
 
-  Tables skipped (1):
-    - UserSessions (skipped)
-─────────────────────────────────────────────────────
-
-Continue? (yes/no): yes
-
-Transferring tables...
-
-  ✓ Tenants                           2 rows
-  ✓ AspNetRoles                       3 rows
-  ✓ AspNetUsers                       12 rows
-  ✓ Expenses                          4821 rows
-  - UserSessions                      skipped (skipped)
-  ...
-
-Transfer Summary
-─────────────────────────────────────────────────────
-  Transferred at:     2026-03-19T04:00:00Z
-  Tables transferred: 12
-  Tables skipped:     1
-  Total rows:         5103
-─────────────────────────────────────────────────────
+```bash
+mv bin/dbsync /usr/local/bin/dbsync
 ```
 
 ---
