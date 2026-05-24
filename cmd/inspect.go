@@ -67,9 +67,10 @@ func runInspect(cmd *cobra.Command, args []string) error {
 	}
 	defer adapter.Close(ctx)
 
-	outputDir := filepath.Join(cfg.Output.Directory, dbName+"_"+time.Now().UTC().Format("2006-01-02T15-04-05Z"))
+	rootDir := filepath.Join(cfg.Output.Directory, time.Now().UTC().Format("2006-01-02T15-04-05Z")+"_"+dbName)
+	inspectDir := filepath.Join(rootDir, "01-inspect")
 
-	schema, err := inspect.Run(ctx, adapter, cfg.Source.Engine, host, dbName, outputDir, cfg.IgnoredTables)
+	schema, err := inspect.Run(ctx, adapter, cfg.Source.Engine, host, dbName, inspectDir, cfg.IgnoredTables)
 	if err != nil {
 		return fmt.Errorf("inspect failed: %w", err)
 	}
@@ -91,7 +92,8 @@ func runInspect(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 	fmt.Println("─────────────────────────────────────────────────────")
-	fmt.Printf("  Schema saved to: %s\n", inspect.OutputPath(outputDir))
+	fmt.Printf("  Schema saved to: %s\n", inspect.OutputPath(inspectDir))
+	fmt.Printf("  Backup dir:      %s\n", rootDir)
 	fmt.Println("─────────────────────────────────────────────────────")
 
 	return nil

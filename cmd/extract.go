@@ -5,45 +5,48 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/opolancoh/dbsync/internal/backup"
 	"github.com/opolancoh/dbsync/internal/config"
+	"github.com/opolancoh/dbsync/internal/extract"
 	"github.com/opolancoh/dbsync/internal/inspect"
 	"github.com/spf13/cobra"
 )
 
-var backupCmd = &cobra.Command{
-	Use:   "backup",
+var extractCmd = &cobra.Command{
+	Use:   "extract",
 	Short: "Export table data to NDJSON files",
-	RunE:  runBackup,
+	RunE:  runExtract,
 }
 
 var (
-	backupConfigPath string
-	backupDir        string
+	extractConfigPath string
+	extractDir        string
 )
 
 func init() {
-	backupCmd.Flags().StringVar(&backupConfigPath, "config", "", "path to config file (required)")
-	backupCmd.Flags().StringVar(&backupDir, "backup", "", "path to the backup directory produced by inspect (required)")
-	backupCmd.MarkFlagRequired("config")
-	backupCmd.MarkFlagRequired("backup")
+	extractCmd.Flags().StringVar(&extractConfigPath, "config", "", "path to config file (required)")
+	extractCmd.Flags().StringVar(&extractDir, "dir", "", "path to the root backup directory produced by inspect (required)")
+	extractCmd.MarkFlagRequired("config")
+	extractCmd.MarkFlagRequired("dir")
 }
 
-func runBackup(cmd *cobra.Command, args []string) error {
+func runExtract(cmd *cobra.Command, args []string) error {
 	printStep(2)
 
-	cfg, err := config.Load(backupConfigPath)
+	cfg, err := config.Load(extractConfigPath)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
 	if err := cfg.Validate(true, false); err != nil {
 		return err
 	}
-	if err := validateDir(backupDir, "backup directory"); err != nil {
+	if err := validateDir(extractDir, "backup directory"); err != nil {
+		return err
+	}
+	if err := validateFile(filepath.Join(extractDir, "01-inspect", "schema.yaml"), "schema.yaml"); err != nil {
 		return err
 	}
 
-	schema, err := inspect.LoadSchema(backupDir)
+	schema, err := inspect.LoadSchema(filepath.Join(extractDir, "01-inspect"))
 	if err != nil {
 		return fmt.Errorf("loading schema: %w", err)
 	}
@@ -54,7 +57,7 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Host:           %s\n", schema.Host)
 	fmt.Printf("  Database:       %s\n", schema.Database)
 	fmt.Printf("  Output dir:     %s\n", cfg.Output.Directory)
-	fmt.Printf("  Schema:         %s\n", backupDir+"/schema.yaml")
+	fmt.Printf("  Schema:         %s\n", filepath.Join(extractDir, "01-inspect", "schema.yaml"))
 	fmt.Println("─────────────────────────────────────────────────────")
 	fmt.Println()
 
@@ -66,10 +69,12 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	}
 	defer adapter.Close(ctx)
 
+	outputDir := filepath.Join(extractDir, "02-extract")
+
 	fmt.Println("Exporting tables...")
 	fmt.Println()
 
-	manifest, err := backup.Run(ctx, adapter, schema, backupDir, func(table string, rows int, skipped bool) {
+	manifest, err := extract.Run(ctx, adapter, schema, outputDir, func(table string, rows int, skipped bool) {
 		if skipped {
 			fmt.Printf("  - %-40s no rows, skipped\n", table)
 		} else {
@@ -77,7 +82,7 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		}
 	})
 	if err != nil {
-		return fmt.Errorf("backup failed: %w", err)
+		return fmt.Errorf("extract failed: %w", err)
 	}
 
 	totalRows := 0
@@ -85,7 +90,7 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		totalRows += t.Rows
 	}
 	fmt.Println()
-	fmt.Println("Backup Summary")
+	fmt.Println("Extract Summary")
 	fmt.Println("─────────────────────────────────────────────────────")
 	fmt.Printf("  Created at:   %s\n", manifest.CreatedAt)
 	fmt.Printf("  Tables:       %d\n", len(manifest.Tables))
@@ -102,7 +107,7 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 	fmt.Println("─────────────────────────────────────────────────────")
-	fmt.Printf("  Saved to: %s\n", filepath.Join(backupDir, "backup-manifest.yaml"))
+	fmt.Printf("  Saved to: %s\n", filepath.Join(outputDir, "extract-manifest.yaml"))
 	fmt.Println("─────────────────────────────────────────────────────")
 
 	return nil

@@ -14,9 +14,10 @@ var rootCmd = &cobra.Command{
 
 func main() {
 	rootCmd.AddCommand(inspectCmd)
-	rootCmd.AddCommand(backupCmd)
-	rootCmd.AddCommand(analyzeCmd)
+	rootCmd.AddCommand(extractCmd)
+	rootCmd.AddCommand(compareCmd)
 	rootCmd.AddCommand(transferCmd)
+	rootCmd.AddCommand(tuiCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

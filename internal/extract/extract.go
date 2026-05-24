@@ -1,4 +1,4 @@
-package backup
+package extract
 
 import (
 	"context"
@@ -28,19 +28,23 @@ type Summary struct {
 	SkippedTables []string     `yaml:"skipped_tables,omitempty"`
 }
 
-func LoadSummary(backupDir string) (*Summary, error) {
-	data, err := os.ReadFile(filepath.Join(backupDir, "backup-manifest.yaml"))
+func LoadSummary(dir string) (*Summary, error) {
+	data, err := os.ReadFile(filepath.Join(dir, "extract-manifest.yaml"))
 	if err != nil {
-		return nil, fmt.Errorf("reading backup-manifest.yaml: %w", err)
+		return nil, fmt.Errorf("reading extract-manifest.yaml: %w", err)
 	}
 	var manifest Summary
 	if err := yaml.Unmarshal(data, &manifest); err != nil {
-		return nil, fmt.Errorf("parsing backup-manifest.yaml: %w", err)
+		return nil, fmt.Errorf("parsing extract-manifest.yaml: %w", err)
 	}
 	return &manifest, nil
 }
 
-func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema, backupDir string, onProgress func(table string, rows int, skipped bool)) (*Summary, error) {
+func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema, outputDir string, onProgress func(table string, rows int, skipped bool)) (*Summary, error) {
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return nil, fmt.Errorf("creating output directory: %w", err)
+	}
+
 	manifest := &Summary{
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		Engine:    schema.Engine,
@@ -49,7 +53,7 @@ func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema
 	}
 
 	for _, table := range schema.Tables {
-		rows, err := exportTable(ctx, adapter, table.Name, backupDir)
+		rows, err := exportTable(ctx, adapter, table.Name, outputDir)
 		if err != nil {
 			return nil, fmt.Errorf("exporting table %s: %w", table.Name, err)
 		}
@@ -73,15 +77,15 @@ func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema
 		}
 	}
 
-	if err := saveSummary(manifest, backupDir); err != nil {
+	if err := saveManifest(manifest, outputDir); err != nil {
 		return nil, err
 	}
 
 	return manifest, nil
 }
 
-func exportTable(ctx context.Context, adapter adapters.DBAdapter, table, backupDir string) (int, error) {
-	filePath := filepath.Join(backupDir, table+".ndjson")
+func exportTable(ctx context.Context, adapter adapters.DBAdapter, table, outputDir string) (int, error) {
+	filePath := filepath.Join(outputDir, table+".ndjson")
 	f, err := os.Create(filePath)
 	if err != nil {
 		return 0, fmt.Errorf("creating file %s: %w", filePath, err)
@@ -109,17 +113,16 @@ func exportTable(ctx context.Context, adapter adapters.DBAdapter, table, backupD
 	return count, err
 }
 
-func saveSummary(manifest *Summary, backupDir string) error {
+func saveManifest(manifest *Summary, outputDir string) error {
 	data, err := yaml.Marshal(manifest)
 	if err != nil {
 		return fmt.Errorf("marshaling manifest: %w", err)
 	}
 
-	path := filepath.Join(backupDir, "backup-manifest.yaml")
+	path := filepath.Join(outputDir, "extract-manifest.yaml")
 	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("writing backup-manifest.yaml: %w", err)
+		return fmt.Errorf("writing extract-manifest.yaml: %w", err)
 	}
 
 	return nil
 }
-

@@ -6,49 +6,49 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/opolancoh/dbsync/internal/analyze"
-	"github.com/opolancoh/dbsync/internal/backup"
+	"github.com/opolancoh/dbsync/internal/compare"
 	"github.com/opolancoh/dbsync/internal/config"
+	"github.com/opolancoh/dbsync/internal/extract"
 	"github.com/opolancoh/dbsync/internal/inspect"
 	"github.com/spf13/cobra"
 )
 
-var analyzeCmd = &cobra.Command{
-	Use:   "analyze",
+var compareCmd = &cobra.Command{
+	Use:   "compare",
 	Short: "Compare source schema against target DB and produce mapping.yaml",
-	RunE:  runAnalyze,
+	RunE:  runCompare,
 }
 
 var (
-	analyzeConfigPath string
-	analyzeBackupDir  string
+	compareConfigPath string
+	compareRootDir    string
 )
 
 func init() {
-	analyzeCmd.Flags().StringVar(&analyzeConfigPath, "config", "", "path to config file (required)")
-	analyzeCmd.Flags().StringVar(&analyzeBackupDir, "backup", "", "path to the backup directory produced by inspect (required)")
-	analyzeCmd.MarkFlagRequired("config")
-	analyzeCmd.MarkFlagRequired("backup")
+	compareCmd.Flags().StringVar(&compareConfigPath, "config", "", "path to config file (required)")
+	compareCmd.Flags().StringVar(&compareRootDir, "dir", "", "path to the root backup directory (required)")
+	compareCmd.MarkFlagRequired("config")
+	compareCmd.MarkFlagRequired("dir")
 }
 
-func runAnalyze(cmd *cobra.Command, args []string) error {
+func runCompare(cmd *cobra.Command, args []string) error {
 	printStep(3)
 
-	cfg, err := config.Load(analyzeConfigPath)
+	cfg, err := config.Load(compareConfigPath)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
 	if err := cfg.Validate(false, true); err != nil {
 		return err
 	}
-	if err := validateDir(analyzeBackupDir, "backup directory"); err != nil {
+	if err := validateDir(compareRootDir, "backup directory"); err != nil {
 		return err
 	}
-	if err := validateFile(analyzeBackupDir+"/schema.yaml", "schema.yaml"); err != nil {
+	if err := validateFile(filepath.Join(compareRootDir, "01-inspect", "schema.yaml"), "schema.yaml"); err != nil {
 		return err
 	}
 
-	schema, err := inspect.LoadSchema(analyzeBackupDir)
+	schema, err := inspect.LoadSchema(filepath.Join(compareRootDir, "01-inspect"))
 	if err != nil {
 		return fmt.Errorf("loading schema: %w", err)
 	}
@@ -67,7 +67,7 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Target engine:    %s\n", cfg.Source.Engine)
 	fmt.Printf("  Target host:      %s\n", targetHost)
 	fmt.Printf("  Target database:  %s\n", targetDB)
-	fmt.Printf("  Schema:           %s/schema.yaml\n", analyzeBackupDir)
+	fmt.Printf("  Schema:           %s\n", filepath.Join(compareRootDir, "01-inspect", "schema.yaml"))
 	fmt.Println("─────────────────────────────────────────────────────")
 	fmt.Println()
 
@@ -80,32 +80,33 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 	defer targetAdapter.Close(ctx)
 
 	var skippedTables []string
-	manifestPath := analyzeBackupDir + "/backup-manifest.yaml"
+	manifestPath := filepath.Join(compareRootDir, "02-extract", "extract-manifest.yaml")
 	if _, err := os.Stat(manifestPath); err == nil {
-		manifest, err := backup.LoadSummary(analyzeBackupDir)
+		manifest, err := extract.LoadSummary(filepath.Join(compareRootDir, "02-extract"))
 		if err != nil {
-			return fmt.Errorf("loading backup-manifest.yaml: %w", err)
+			return fmt.Errorf("loading extract-manifest.yaml: %w", err)
 		}
 		skippedTables = manifest.SkippedTables
 	}
 
-	mapping, err := analyze.Run(ctx, targetAdapter, schema, analyzeBackupDir, skippedTables)
+	compareDir := filepath.Join(compareRootDir, "03-compare")
+	mapping, err := compare.Run(ctx, targetAdapter, schema, compareDir, skippedTables)
 	if err != nil {
-		return fmt.Errorf("analyze failed: %w", err)
+		return fmt.Errorf("compare failed: %w", err)
 	}
 
 	matched, unmatched := 0, 0
 	for _, t := range mapping.Tables {
-		if t.Status == analyze.StatusMatched {
+		if t.Status == compare.StatusMatched {
 			matched++
 		} else {
 			unmatched++
 		}
 	}
 	fmt.Println()
-	fmt.Println("Analysis Summary")
+	fmt.Println("Compare Summary")
 	fmt.Println("─────────────────────────────────────────────────────")
-	fmt.Printf("  Analyzed at:       %s\n", mapping.AnalyzedAt)
+	fmt.Printf("  Compared at:       %s\n", mapping.ComparedAt)
 	fmt.Printf("  Tables matched:    %d\n", matched)
 	fmt.Printf("  Tables unmatched:  %d\n\n", unmatched)
 	for _, t := range mapping.Tables {
@@ -114,12 +115,12 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 			targetName = *t.Target
 		}
 		status := "✓"
-		if t.Status == analyze.StatusUnmatched {
+		if t.Status == compare.StatusUnmatched {
 			status = "✗"
 		}
 		fmt.Printf("  %s [%-2d] %-30s → %s\n", status, t.Order, t.Source, targetName)
 		for _, f := range t.Fields {
-			if f.Status == analyze.StatusUnmatched {
+			if f.Status == compare.StatusUnmatched {
 				targetField := "not found in target"
 				if f.Target != nil {
 					targetField = fmt.Sprintf("type mismatch: %s → %s", f.SourceType, *f.TargetType)
@@ -130,7 +131,7 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 	fmt.Println("─────────────────────────────────────────────────────")
-	fmt.Printf("  Mapping saved to: %s\n", filepath.Join(analyzeBackupDir, "mapping.yaml"))
+	fmt.Printf("  Mapping saved to: %s\n", filepath.Join(compareRootDir, "03-compare", "mapping.yaml"))
 	fmt.Println("─────────────────────────────────────────────────────")
 
 	return nil

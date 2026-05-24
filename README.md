@@ -11,14 +11,14 @@ dbsync copies **records** from tables in a source database into a target databas
 The workflow is four sequential steps, each producing output files that feed into the next:
 
 ```
-inspect  →  backup  →  analyze  →  transfer
+inspect  →  extract  →  compare  →  transfer
 ```
 
 | Step       | What it does                                                    | Output                                  |
 |------------|-----------------------------------------------------------------|-----------------------------------------|
-| `inspect`  | Reads table names, column names, types and nullability          | `schema.yaml`                           |
-| `backup`   | Backs up all rows from each table into a dedicated NDJSON file  | `backup-manifest.yaml` (row counts + skipped tables) + `.ndjson` files |
-| `analyze`  | Compares source schema against target DB and produces a mapping | `mapping.yaml`                          |
+| `inspect`  | Reads table names, column names, types and nullability          | `01-inspect/schema.yaml`                |
+| `extract`  | Exports all rows from each table into a dedicated NDJSON file   | `02-extract/extract-manifest.yaml` + `.ndjson` files |
+| `compare`  | Compares source schema against target DB and produces a mapping | `03-compare/mapping.yaml`               |
 | `transfer` | Copies rows into the target DB tables using the mapping         | —                                       |
 
 ---
@@ -62,10 +62,10 @@ ignored_tables:
 
 Connection strings are passed inline with each command as environment variables:
 
-| Variable             | Required for              | Description                          |
-|----------------------|---------------------------|--------------------------------------|
-| `DBSYNC_SOURCE_CONN` | `inspect`, `backup`       | Connection string for the source DB  |
-| `DBSYNC_TARGET_CONN` | `analyze`, `transfer`     | Connection string for the target DB  |
+| Variable             | Required for               | Description                          |
+|----------------------|----------------------------|--------------------------------------|
+| `DBSYNC_SOURCE_CONN` | `inspect`, `extract`       | Connection string for the source DB  |
+| `DBSYNC_TARGET_CONN` | `compare`, `transfer`      | Connection string for the target DB  |
 
 ---
 
@@ -73,7 +73,7 @@ Connection strings are passed inline with each command as environment variables:
 
 Connects to the source database, reads all table names and their column definitions (name, type, nullability), and saves the result as `schema.yaml`. Tables listed in `ignored_tables` are excluded.
 
-This step is the starting point of every workflow. The output directory is named `{dbname}_{timestamp}` and is created inside the configured output directory.
+This step is the starting point of every workflow. The output directory is named `{timestamp}_{dbname}` and is created inside the configured output directory.
 
 ```bash
 DBSYNC_SOURCE_CONN="postgres://user:password@host:5432/dbname" \
@@ -84,53 +84,56 @@ DBSYNC_SOURCE_CONN="postgres://user:password@host:5432/dbname" \
 
 ```
 backups/
-  spenbify_2026-03-19T02-00-00Z/
-    schema.yaml
+  2026-03-19T02-00-00Z_spenbify/
+    01-inspect/
+      schema.yaml
 ```
 
-Review `schema.yaml` to confirm all expected tables and fields are present before running `backup`.
+Review `schema.yaml` to confirm all expected tables and fields are present before running `extract`.
 
 ---
 
-## Step 2 — Backup
+## Step 2 — Extract
 
-Reads `schema.yaml` from the inspect output and exports every table's data to a separate NDJSON file (one JSON object per line). Tables with no rows are skipped — no empty files are created. A `backup-manifest.yaml` is saved recording row counts and skipped tables per table. It is used by the `analyze` step to automatically exclude empty tables from the mapping.
+Reads `schema.yaml` from the inspect output and exports every table's data to a separate NDJSON file (one JSON object per line). Tables with no rows are skipped — no empty files are created. An `extract-manifest.yaml` is saved recording row counts and skipped tables. It is used by the `compare` step to automatically exclude empty tables from the mapping.
 
-This step requires a prior `inspect` run. The `--backup` flag must point to the directory created by `inspect`.
+This step requires a prior `inspect` run. The `--dir` flag must point to the directory created by `inspect`.
 
 ```bash
 DBSYNC_SOURCE_CONN="postgres://user:password@host:5432/dbname" \
-./dbsync backup --config ./config.yaml --backup ./backups/spenbify_2026-03-19T02-00-00Z
+./dbsync extract --config ./config.yaml --dir ./backups/2026-03-19T02-00-00Z_spenbify
 ```
 
 **Output files:**
 
 ```
 backups/
-  spenbify_2026-03-19T02-00-00Z/
-    schema.yaml
-    backup-manifest.yaml
-    Tenants.ndjson
-    AspNetUsers.ndjson
-    Expenses.ndjson
-    ...
+  2026-03-19T02-00-00Z_spenbify/
+    01-inspect/
+      schema.yaml
+    02-extract/
+      extract-manifest.yaml
+      Tenants.ndjson
+      AspNetUsers.ndjson
+      Expenses.ndjson
+      ...
 ```
 
-Review `backup-manifest.yaml` to confirm all expected tables and row counts are present before proceeding.
+Review `extract-manifest.yaml` to confirm all expected tables and row counts are present before proceeding.
 
 ---
 
-## Step 3 — Analyze
+## Step 3 — Compare
 
-Connects to the **target** database, reads its schema, and compares it against `schema.yaml` from the backup. For each source table and field, it checks whether a matching table/field exists in the target with the same name and type.
+Connects to the **target** database, reads its schema, and compares it against `schema.yaml` from the inspect output. For each source table and field, it checks whether a matching table/field exists in the target with the same name and type.
 
-The result is saved as `mapping.yaml` inside the backup directory. This file is the input for the `transfer` step and is designed to be reviewed and edited before proceeding. Tables that had no rows (listed in `backup-manifest.yaml`) are excluded from the mapping automatically.
+The result is saved as `mapping.yaml` inside the `03-compare` folder. This file is the input for the `transfer` step and is designed to be reviewed and edited before proceeding. Tables that had no rows (listed in `extract-manifest.yaml`) are excluded from the mapping automatically.
 
-This step requires a prior `backup` run.
+This step requires a prior `extract` run.
 
 ```bash
 DBSYNC_TARGET_CONN="postgres://user:password@target-host:5432/target-dbname" \
-./dbsync analyze --config ./config.yaml --backup ./backups/spenbify_2026-03-19T02-00-00Z
+./dbsync compare --config ./config.yaml --dir ./backups/2026-03-19T02-00-00Z_spenbify
 ```
 
 **Editing `mapping.yaml` before transfer:**
@@ -143,7 +146,7 @@ The number in brackets is the transfer order. Tables with the same order number 
 - **Remap a field** — change a field's `target` to a different column name
 
 ```yaml
-analyzed_at: "2026-03-19T03:00:00Z"
+compared_at: "2026-03-19T03:00:00Z"
 tables:
   - source: Tenants
     target: Tenants
@@ -176,19 +179,19 @@ The target DB must already have the schema (migrations) applied before running t
 ```bash
 # Basic transfer
 DBSYNC_TARGET_CONN="postgres://user:password@target-host:5432/target-dbname" \
-./dbsync transfer --config ./config.yaml --backup ./backups/spenbify_2026-03-19T02-00-00Z
+./dbsync transfer --config ./config.yaml --dir ./backups/2026-03-19T02-00-00Z_spenbify
 
 # Custom chunk size (rows per insert batch)
 DBSYNC_TARGET_CONN="..." \
-./dbsync transfer --config ./config.yaml --backup ./backups/spenbify_2026-03-19T02-00-00Z --chunk 1000
+./dbsync transfer --config ./config.yaml --dir ./backups/2026-03-19T02-00-00Z_spenbify --chunk 1000
 
 # Continue on error instead of stopping
 DBSYNC_TARGET_CONN="..." \
-./dbsync transfer --config ./config.yaml --backup ./backups/spenbify_2026-03-19T02-00-00Z --no-interrupt
+./dbsync transfer --config ./config.yaml --dir ./backups/2026-03-19T02-00-00Z_spenbify --no-interrupt
 
 # Truncate target tables before inserting
 DBSYNC_TARGET_CONN="..." \
-./dbsync transfer --config ./config.yaml --backup ./backups/spenbify_2026-03-19T02-00-00Z --truncate
+./dbsync transfer --config ./config.yaml --dir ./backups/2026-03-19T02-00-00Z_spenbify --truncate
 ```
 
 **Flags:**
@@ -226,20 +229,6 @@ To make the binary available system-wide:
 
 ```bash
 mv bin/dbsync /usr/local/bin/dbsync
-```
-
----
-
-## Scheduling
-
-The tool has no built-in scheduler. Use cron, Task Scheduler, or a CI pipeline job to run `inspect` and `backup` on a schedule.
-
-Example cron (daily at 2 AM):
-
-```bash
-0 2 * * * DBSYNC_SOURCE_CONN="..." /usr/local/bin/dbsync inspect --config /etc/dbsync/config.yaml && \
-          DBSYNC_SOURCE_CONN="..." /usr/local/bin/dbsync backup --config /etc/dbsync/config.yaml \
-          --backup $(ls -td /etc/dbsync/backups/*/ | head -1) >> /var/log/dbsync.log 2>&1
 ```
 
 ---

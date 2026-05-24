@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/opolancoh/dbsync/internal/config"
@@ -20,7 +21,7 @@ var transferCmd = &cobra.Command{
 
 var (
 	transferConfigPath  string
-	transferBackupDir   string
+	transferRootDir     string
 	transferChunkSize   int
 	transferTruncate    bool
 	transferNoInterrupt bool
@@ -28,12 +29,12 @@ var (
 
 func init() {
 	transferCmd.Flags().StringVar(&transferConfigPath, "config", "", "path to config file (required)")
-	transferCmd.Flags().StringVar(&transferBackupDir, "backup", "", "path to the backup directory (required)")
+	transferCmd.Flags().StringVar(&transferRootDir, "dir", "", "path to the root backup directory (required)")
 	transferCmd.Flags().IntVar(&transferChunkSize, "chunk", 500, "number of rows per insert batch")
 	transferCmd.Flags().BoolVar(&transferTruncate, "truncate", false, "truncate target tables before inserting")
 	transferCmd.Flags().BoolVar(&transferNoInterrupt, "no-interrupt", false, "continue transferring remaining tables if one fails")
 	transferCmd.MarkFlagRequired("config")
-	transferCmd.MarkFlagRequired("backup")
+	transferCmd.MarkFlagRequired("dir")
 }
 
 func runTransfer(cmd *cobra.Command, args []string) error {
@@ -46,14 +47,14 @@ func runTransfer(cmd *cobra.Command, args []string) error {
 	if err := cfg.Validate(false, true); err != nil {
 		return err
 	}
-	if err := validateDir(transferBackupDir, "backup directory"); err != nil {
+	if err := validateDir(transferRootDir, "backup directory"); err != nil {
 		return err
 	}
-	if err := validateFile(transferBackupDir+"/mapping.yaml", "mapping.yaml"); err != nil {
+	if err := validateFile(filepath.Join(transferRootDir, "03-compare", "mapping.yaml"), "mapping.yaml"); err != nil {
 		return err
 	}
 
-	mapping, err := transfer.LoadMapping(transferBackupDir)
+	mapping, err := transfer.LoadMapping(filepath.Join(transferRootDir, "03-compare"))
 	if err != nil {
 		return fmt.Errorf("loading mapping: %w", err)
 	}
@@ -72,7 +73,7 @@ func runTransfer(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Target engine:    %s\n", cfg.Source.Engine)
 	fmt.Printf("  Target host:      %s\n", targetHost)
 	fmt.Printf("  Target database:  %s\n", targetDB)
-	fmt.Printf("  Backup:           %s\n", transferBackupDir)
+	fmt.Printf("  Backup:           %s\n", transferRootDir)
 	fmt.Printf("  Chunk size:       %d\n", transferChunkSize)
 	fmt.Printf("  No-interrupt:     %v\n", transferNoInterrupt)
 	if transferTruncate {
@@ -138,7 +139,7 @@ func runTransfer(cmd *cobra.Command, args []string) error {
 	fmt.Println("Transferring tables...")
 	fmt.Println()
 
-	summary, err := transfer.Run(ctx, targetAdapter, mapping, transferBackupDir, opts)
+	summary, err := transfer.Run(ctx, targetAdapter, mapping, filepath.Join(transferRootDir, "02-extract"), opts)
 	if err != nil {
 		return fmt.Errorf("transfer failed: %w", err)
 	}

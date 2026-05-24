@@ -1,4 +1,4 @@
-package analyze
+package compare
 
 import (
 	"context"
@@ -35,11 +35,11 @@ type TableMapping struct {
 }
 
 type Mapping struct {
-	AnalyzedAt string         `yaml:"analyzed_at"`
+	ComparedAt string         `yaml:"compared_at"`
 	Tables     []TableMapping `yaml:"tables"`
 }
 
-func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema, backupDir string, skippedTables []string) (*Mapping, error) {
+func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema, outputDir string, skippedTables []string) (*Mapping, error) {
 	skippedSet := make(map[string]bool, len(skippedTables))
 	for _, t := range skippedTables {
 		skippedSet[t] = true
@@ -64,7 +64,7 @@ func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema
 	}
 
 	mapping := &Mapping{
-		AnalyzedAt: time.Now().UTC().Format(time.RFC3339),
+		ComparedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
 	order := 1
@@ -124,21 +124,24 @@ func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema
 		mapping.Tables = append(mapping.Tables, tableMapping)
 	}
 
-	if err := save(mapping, backupDir); err != nil {
+	if err := save(mapping, outputDir); err != nil {
 		return nil, err
 	}
 
 	return mapping, nil
 }
 
+func save(mapping *Mapping, outputDir string) error {
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("creating output directory: %w", err)
+	}
 
-func save(mapping *Mapping, backupDir string) error {
 	data, err := yaml.Marshal(mapping)
 	if err != nil {
 		return fmt.Errorf("marshaling mapping: %w", err)
 	}
 
-	path := filepath.Join(backupDir, "mapping.yaml")
+	path := filepath.Join(outputDir, "mapping.yaml")
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		return fmt.Errorf("writing mapping.yaml: %w", err)
 	}

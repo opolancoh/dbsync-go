@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/opolancoh/dbsync/internal/adapters"
-	"github.com/opolancoh/dbsync/internal/analyze"
+	"github.com/opolancoh/dbsync/internal/compare"
 	"gopkg.in/yaml.v3"
 )
 
@@ -35,20 +35,20 @@ type Summary struct {
 	Tables        []TableResult
 }
 
-func LoadMapping(backupDir string) (*analyze.Mapping, error) {
+func LoadMapping(backupDir string) (*compare.Mapping, error) {
 	data, err := os.ReadFile(filepath.Join(backupDir, "mapping.yaml"))
 	if err != nil {
 		return nil, fmt.Errorf("reading mapping.yaml: %w", err)
 	}
-	var mapping analyze.Mapping
+	var mapping compare.Mapping
 	if err := yaml.Unmarshal(data, &mapping); err != nil {
 		return nil, fmt.Errorf("parsing mapping.yaml: %w", err)
 	}
 	return &mapping, nil
 }
 
-func SortedPlan(mapping *analyze.Mapping) (toTransfer, toSkip []analyze.TableMapping) {
-	tables := make([]analyze.TableMapping, len(mapping.Tables))
+func SortedPlan(mapping *compare.Mapping) (toTransfer, toSkip []compare.TableMapping) {
+	tables := make([]compare.TableMapping, len(mapping.Tables))
 	copy(tables, mapping.Tables)
 	sort.SliceStable(tables, func(i, j int) bool {
 		if tables[i].Order != tables[j].Order {
@@ -58,7 +58,7 @@ func SortedPlan(mapping *analyze.Mapping) (toTransfer, toSkip []analyze.TableMap
 	})
 
 	for _, t := range tables {
-		if t.Skip || t.Status == analyze.StatusUnmatched {
+		if t.Skip || t.Status == compare.StatusUnmatched {
 			toSkip = append(toSkip, t)
 		} else {
 			toTransfer = append(toTransfer, t)
@@ -68,7 +68,7 @@ func SortedPlan(mapping *analyze.Mapping) (toTransfer, toSkip []analyze.TableMap
 }
 
 
-func Run(ctx context.Context, adapter adapters.DBAdapter, mapping *analyze.Mapping, backupDir string, opts Options) (*Summary, error) {
+func Run(ctx context.Context, adapter adapters.DBAdapter, mapping *compare.Mapping, backupDir string, opts Options) (*Summary, error) {
 	summary := &Summary{
 		TransferredAt: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -141,10 +141,10 @@ func Run(ctx context.Context, adapter adapters.DBAdapter, mapping *analyze.Mappi
 	return summary, nil
 }
 
-func transferTable(ctx context.Context, adapter adapters.DBAdapter, tableMapping analyze.TableMapping, ndjsonPath string, chunkSize int) (int, error) {
+func transferTable(ctx context.Context, adapter adapters.DBAdapter, tableMapping compare.TableMapping, ndjsonPath string, chunkSize int) (int, error) {
 	fieldMap := make(map[string]string)
 	for _, f := range tableMapping.Fields {
-		if f.Status == analyze.StatusMatched && f.Target != nil {
+		if f.Status == compare.StatusMatched && f.Target != nil {
 			fieldMap[f.Source] = *f.Target
 		}
 	}

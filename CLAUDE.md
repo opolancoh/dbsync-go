@@ -25,26 +25,33 @@ There are no tests in this project currently.
 
 ## Architecture
 
-The four-step pipeline (`inspect → backup → analyze → transfer`) maps directly to four subcommands in `cmd/` and four packages in `internal/`:
+The four-step pipeline (`inspect → extract → compare → transfer`) maps directly to four subcommands in `cmd/` and four packages in `internal/`:
 
 ```
 cmd/          ← Cobra CLI wiring; one file per subcommand
 internal/
   adapters/   ← DBAdapter interface + PostgreSQL implementation
   inspect/    ← Reads source schema → schema.yaml
-  backup/     ← Exports table rows → *.ndjson + backup-manifest.yaml
-  analyze/    ← Compares source schema vs target DB → mapping.yaml
+  extract/    ← Exports table rows → *.ndjson + extract-manifest.yaml
+  compare/    ← Compares source schema vs target DB → mapping.yaml
   transfer/   ← Reads mapping + ndjson files, inserts into target DB
   config/     ← Loads config.yaml, reads env vars
 ```
 
-Each pipeline step writes files into a backup directory (`{dbname}_{timestamp}/`). The next step reads those files as input — steps are decoupled by the filesystem, not function calls.
+Each pipeline step writes files into a timestamped directory (`{timestamp}_{dbname}/`). Steps are decoupled by the filesystem — each reads the prior step's output folder via `--dir`. Per-step subfolders keep outputs organized:
+
+```
+{timestamp}_{dbname}/
+  01-inspect/   schema.yaml
+  02-extract/   extract-manifest.yaml + *.ndjson
+  03-compare/   mapping.yaml
+```
 
 ### Key data flow
 
-- `inspect.Schema` → serialized to `schema.yaml`
-- `backup.Summary` → serialized to `backup-manifest.yaml`; skipped tables (no rows) are recorded here so `analyze` can auto-exclude them
-- `analyze.Mapping` → serialized to `mapping.yaml`; intended to be hand-edited before transfer (set `skip: true`, change `order`, remap `target` names)
+- `inspect.Schema` → serialized to `01-inspect/schema.yaml`
+- `extract.Summary` → serialized to `02-extract/extract-manifest.yaml`; skipped tables (no rows) are recorded here so `compare` can auto-exclude them
+- `compare.Mapping` → serialized to `03-compare/mapping.yaml`; intended to be hand-edited before transfer (set `skip: true`, change `order`, remap `target` names)
 - `transfer` reads `mapping.yaml` + `*.ndjson`, inserts via `DBAdapter.InsertRows` in configurable chunk batches
 
 ### DBAdapter interface
@@ -55,8 +62,8 @@ Each pipeline step writes files into a backup directory (`{dbname}_{timestamp}/`
 
 `config.yaml` sets `source.engine`, `output.directory`, and `ignored_tables`. Connection strings are always passed via environment variables — never in the config file:
 
-- `DBSYNC_SOURCE_CONN` — used by `inspect` and `backup`
-- `DBSYNC_TARGET_CONN` — used by `analyze` and `transfer`
+- `DBSYNC_SOURCE_CONN` — used by `inspect` and `extract`
+- `DBSYNC_TARGET_CONN` — used by `compare` and `transfer`
 
 ### Transfer field mapping
 
