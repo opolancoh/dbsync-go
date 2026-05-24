@@ -6,7 +6,7 @@ CLI tool to export data from a database and transfer it into a target database. 
 
 ## How it works
 
-dbsync copies **records** from tables in a source database into a target database.
+dbsync copies **records** from tables in a source database into a target database through a guided TUI (terminal user interface).
 
 The workflow is four sequential steps, each producing output files that feed into the next:
 
@@ -14,12 +14,14 @@ The workflow is four sequential steps, each producing output files that feed int
 inspect  →  extract  →  compare  →  transfer
 ```
 
-| Step       | What it does                                                    | Output                                  |
-|------------|-----------------------------------------------------------------|-----------------------------------------|
-| `inspect`  | Reads table names, column names, types and nullability          | `01-inspect/schema.yaml`                |
+| Step       | What it does                                                    | Output                                           |
+|------------|-----------------------------------------------------------------|--------------------------------------------------|
+| `inspect`  | Reads table names, column names, types and nullability          | `01-inspect/schema.yaml`                         |
 | `extract`  | Exports all rows from each table into a dedicated NDJSON file   | `02-extract/extract-manifest.yaml` + `.ndjson` files |
-| `compare`  | Compares source schema against target DB and produces a mapping | `03-compare/mapping.yaml`               |
-| `transfer` | Copies rows into the target DB tables using the mapping         | —                                       |
+| `compare`  | Compares source schema against target DB and produces a mapping | `03-compare/mapping.yaml`                        |
+| `transfer` | Copies rows into the target DB tables using the mapping         | `04-transfer/transfer.log`                       |
+
+All steps run inside the TUI — there are no individual subcommands.
 
 ---
 
@@ -58,57 +60,100 @@ ignored_tables:
 
 `ignored_tables` lists tables excluded during `inspect`. Since they never appear in `schema.yaml`, they are absent from all subsequent steps automatically.
 
-### 3. Connection strings
+### 3. Run
 
-Connection strings are passed inline with each command as environment variables:
-
-| Variable             | Required for               | Description                          |
-|----------------------|----------------------------|--------------------------------------|
-| `DBSYNC_SOURCE_CONN` | `inspect`, `extract`       | Connection string for the source DB  |
-| `DBSYNC_TARGET_CONN` | `compare`, `transfer`      | Connection string for the target DB  |
+```bash
+./dbsync tui
+```
 
 ---
 
-## Step 1 — Inspect
+## TUI walkthrough
 
-Connects to the source database, reads all table names and their column definitions (name, type, nullability), and saves the result as `schema.yaml`. Tables listed in `ignored_tables` are excluded.
+### Config screen
 
-This step is the starting point of every workflow. The output directory is named `{timestamp}_{dbname}` and is created inside the configured output directory.
-
-```bash
-DBSYNC_SOURCE_CONN="postgres://user:password@host:5432/dbname" \
-./dbsync inspect --config ./config.yaml
-```
-
-**Output files:**
+Enter the config file path, source connection string, and target connection string. The tool tests both connections before proceeding. Source and target must be different databases.
 
 ```
-backups/
-  2026-03-19T02-00-00Z_spenbify/
-    01-inspect/
-      schema.yaml
+  Config file path
+  ./config.yaml
+
+  Source connection
+  postgres://user:password@source-host:5432/dbname
+
+  Target connection
+  postgres://user:password@target-host:5432/target-dbname
 ```
 
-Review `schema.yaml` to confirm all expected tables and fields are present before running `extract`.
+Keys:
+
+```
+  [tab] next field
+  [enter] confirm field / start
+  [ctrl+c] quit
+```
+
+### Inspect screen
+
+Connects to the source database and reads all table and column definitions. Output goes into `01-inspect/schema.yaml` inside a timestamped folder named `{timestamp}_{dbname}`.
+
+Keys:
+
+```
+  [enter] start extract
+  [q] quit
+```
+
+### Extract screen
+
+Exports every table's rows to a separate NDJSON file (one JSON object per line). Tables with no rows are skipped — no empty files are created. Results are recorded in `02-extract/extract-manifest.yaml`.
+
+Keys:
+
+```
+  [enter] start compare
+  [q] quit
+```
+
+### Compare screen
+
+Connects to the target database and compares its schema against the source. Shows each table and its match status. Unmatched tables and fields are highlighted and excluded from transfer automatically.
+
+**Reordering tables** — use `+` / `-` to move the selected table up or down before starting the transfer. This controls the transfer order, which matters when tables have foreign key dependencies. The order is saved back to `mapping.yaml` automatically when transfer starts.
+
+Keys:
+
+```
+  [↑↓] select
+  [+/-] reorder
+  [enter] start transfer
+  [q] quit
+```
+
+### Transfer screen
+
+Inserts rows into the target database table by table. Each table shows live status (pending → row count or error). Inserts use `ON CONFLICT DO NOTHING`, so re-running is safe — existing rows are silently skipped.
+
+### Done screen
+
+Shows per-table results and a summary: source DB, target DB, tables transferred, rows transferred, tables skipped, and tables failed. A full log is written to `04-transfer/transfer.log`.
+
+Keys:
+
+```
+  [r] retry transfer (returns to Compare screen)
+  [enter] / [q] exit
+```
 
 ---
 
-## Step 2 — Extract
+## Output structure
 
-Reads `schema.yaml` from the inspect output and exports every table's data to a separate NDJSON file (one JSON object per line). Tables with no rows are skipped — no empty files are created. An `extract-manifest.yaml` is saved recording row counts and skipped tables. It is used by the `compare` step to automatically exclude empty tables from the mapping.
-
-This step requires a prior `inspect` run. The `--dir` flag must point to the directory created by `inspect`.
-
-```bash
-DBSYNC_SOURCE_CONN="postgres://user:password@host:5432/dbname" \
-./dbsync extract --config ./config.yaml --dir ./backups/2026-03-19T02-00-00Z_spenbify
-```
-
-**Output files:**
+Each run creates a timestamped directory inside the configured output directory:
 
 ```
 backups/
-  2026-03-19T02-00-00Z_spenbify/
+  2026-05-24T18-00-00Z_mydb/
     01-inspect/
       schema.yaml
     02-extract/
@@ -117,36 +162,23 @@ backups/
       AspNetUsers.ndjson
       Expenses.ndjson
       ...
+    03-compare/
+      mapping.yaml
+    04-transfer/
+      transfer.log
 ```
 
-Review `extract-manifest.yaml` to confirm all expected tables and row counts are present before proceeding.
+### Editing `mapping.yaml`
 
----
+The compare step writes `mapping.yaml`, which the TUI reads at transfer time. You can edit it manually while on the Compare screen before pressing enter. Supported edits:
 
-## Step 3 — Compare
-
-Connects to the **target** database, reads its schema, and compares it against `schema.yaml` from the inspect output. For each source table and field, it checks whether a matching table/field exists in the target with the same name and type.
-
-The result is saved as `mapping.yaml` inside the `03-compare` folder. This file is the input for the `transfer` step and is designed to be reviewed and edited before proceeding. Tables that had no rows (listed in `extract-manifest.yaml`) are excluded from the mapping automatically.
-
-This step requires a prior `extract` run.
-
-```bash
-DBSYNC_TARGET_CONN="postgres://user:password@target-host:5432/target-dbname" \
-./dbsync compare --config ./config.yaml --dir ./backups/2026-03-19T02-00-00Z_spenbify
-```
-
-**Editing `mapping.yaml` before transfer:**
-
-The number in brackets is the transfer order. Tables with the same order number are sorted alphabetically. You can edit this file to:
-
-- **Control transfer order** — set `order` to define which tables are transferred first (useful for foreign key dependencies)
 - **Skip a table** — set `skip: true` to exclude it from the transfer
 - **Remap a table** — change `target` to a different table name in the target DB
-- **Remap a field** — change a field's `target` to a different column name
+- **Remap a field** — change a field's `target` to a different column name in the target DB
+- **Control transfer order** — set `order` directly (the TUI `+`/`-` keys update this automatically)
 
 ```yaml
-compared_at: "2026-03-19T03:00:00Z"
+compared_at: "2026-05-24T18-00-00Z"
 tables:
   - source: Tenants
     target: Tenants
@@ -167,40 +199,6 @@ tables:
     order: 5
     fields: ...
 ```
-
----
-
-## Step 4 — Transfer
-
-Reads `mapping.yaml` and the NDJSON files and copies data into the target database. Tables are transferred in the order defined by the `order` field in `mapping.yaml`. Tables with the same order value are sorted alphabetically.
-
-The target DB must already have the schema (migrations) applied before running this step. Before any data is written, the tool prints the parameters and the transfer plan and asks for confirmation.
-
-```bash
-# Basic transfer
-DBSYNC_TARGET_CONN="postgres://user:password@target-host:5432/target-dbname" \
-./dbsync transfer --config ./config.yaml --dir ./backups/2026-03-19T02-00-00Z_spenbify
-
-# Custom chunk size (rows per insert batch)
-DBSYNC_TARGET_CONN="..." \
-./dbsync transfer --config ./config.yaml --dir ./backups/2026-03-19T02-00-00Z_spenbify --chunk 1000
-
-# Continue on error instead of stopping
-DBSYNC_TARGET_CONN="..." \
-./dbsync transfer --config ./config.yaml --dir ./backups/2026-03-19T02-00-00Z_spenbify --no-interrupt
-
-# Truncate target tables before inserting
-DBSYNC_TARGET_CONN="..." \
-./dbsync transfer --config ./config.yaml --dir ./backups/2026-03-19T02-00-00Z_spenbify --truncate
-```
-
-**Flags:**
-
-| Flag             | Default | Description                                                      |
-|------------------|---------|------------------------------------------------------------------|
-| `--chunk`        | `500`   | Number of rows inserted per batch                                |
-| `--no-interrupt` | `false` | Continue transferring remaining tables if one fails              |
-| `--truncate`     | `false` | Delete all existing rows from each target table before inserting |
 
 ---
 

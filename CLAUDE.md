@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`dbsync` is a Go CLI tool for migrating data between databases. It handles schema differences between source and target, making it suitable for data migrations where table/column names or types may have changed.
+`dbsync` is a Go CLI tool for migrating data between databases. It exposes a single TUI command (`dbsync tui`) that walks the user through a four-step pipeline: inspect → extract → compare → transfer. It handles schema differences between source and target, making it suitable for data migrations where table/column names or types may have changed.
 
 ## Build commands
 
@@ -25,45 +25,59 @@ There are no tests in this project currently.
 
 ## Architecture
 
-The four-step pipeline (`inspect → extract → compare → transfer`) maps directly to four subcommands in `cmd/` and four packages in `internal/`:
+The four-step pipeline (`inspect → extract → compare → transfer`) maps to four packages in `internal/`. The only user-facing entry point is the TUI:
 
 ```
-cmd/          ← Cobra CLI wiring; one file per subcommand
+cmd/
+  main.go     ← registers tuiCmd only
+  tui.go      ← runs tui.New() with tea.WithAltScreen()
 internal/
+  tui/        ← Bubble Tea model; drives the full pipeline interactively
   adapters/   ← DBAdapter interface + PostgreSQL implementation
   inspect/    ← Reads source schema → schema.yaml
   extract/    ← Exports table rows → *.ndjson + extract-manifest.yaml
   compare/    ← Compares source schema vs target DB → mapping.yaml
   transfer/   ← Reads mapping + ndjson files, inserts into target DB
-  config/     ← Loads config.yaml, reads env vars
+  config/     ← Loads config.yaml
 ```
 
-Each pipeline step writes files into a timestamped directory (`{timestamp}_{dbname}/`). Steps are decoupled by the filesystem — each reads the prior step's output folder via `--dir`. Per-step subfolders keep outputs organized:
+Each pipeline step writes files into a timestamped directory (`{timestamp}_{dbname}/`) inside the configured output directory. Per-step subfolders keep outputs organized:
 
 ```
 {timestamp}_{dbname}/
   01-inspect/   schema.yaml
   02-extract/   extract-manifest.yaml + *.ndjson
   03-compare/   mapping.yaml
+  04-transfer/  transfer.log
 ```
 
 ### Key data flow
 
 - `inspect.Schema` → serialized to `01-inspect/schema.yaml`
-- `extract.Summary` → serialized to `02-extract/extract-manifest.yaml`; skipped tables (no rows) are recorded here so `compare` can auto-exclude them
-- `compare.Mapping` → serialized to `03-compare/mapping.yaml`; intended to be hand-edited before transfer (set `skip: true`, change `order`, remap `target` names)
-- `transfer` reads `mapping.yaml` + `*.ndjson`, inserts via `DBAdapter.InsertRows` in configurable chunk batches
+- `extract.Summary` → serialized to `02-extract/extract-manifest.yaml`; skipped tables (no rows) are recorded here so `compare` auto-excludes them
+- `compare.Mapping` → serialized to `03-compare/mapping.yaml`; the TUI reorder (`+`/`-` keys) updates `Order` fields and calls `compare.Save()` before transfer starts
+- `transfer` reads `mapping.yaml` + `*.ndjson`, inserts via `DBAdapter.InsertRows` using `ON CONFLICT DO NOTHING` (idempotent — safe to re-run); writes `04-transfer/transfer.log`
+
+### TUI (internal/tui/model.go)
+
+Bubble Tea model driving the full workflow. Steps: `stepConfig → stepInspect → stepBackup → stepAnalyze → stepTransfer → stepDone`.
+
+Key behaviors:
+
+- Connection strings are entered in the Config screen (not env vars); source and target must be different databases
+- Streaming progress uses a buffered `chan tea.Msg` + chained `listenForProgress` tea.Cmd
+- Each step creates and owns its own DB adapter, closed via `defer` when the step goroutine exits — no shared adapter state between steps
+- The transfer adapter is created fresh inside the transfer goroutine (never reused from compare)
+- `m.transferProgress map[string]transferProgressMsg` tracks per-table live status during transfer
+- Retry (`r` key on done screen) returns to `stepAnalyze` with `m.transferProgress` and `m.summary` cleared
 
 ### DBAdapter interface
 
-`internal/adapters/adapter.go` defines the `DBAdapter` interface. Only PostgreSQL (`adapters/postgres.go`) is implemented. New engines plug in by implementing this interface and adding a case in `cmd/inspect.go:newAdapterFromConn`.
+`internal/adapters/adapter.go` defines the `DBAdapter` interface. Only PostgreSQL (`adapters/postgres.go`) is implemented. New engines plug in by implementing this interface and wiring a new connection factory in the TUI's `cmdInspect` / `cmdAnalyze` / transfer goroutine.
 
 ### Configuration
 
-`config.yaml` sets `source.engine`, `output.directory`, and `ignored_tables`. Connection strings are always passed via environment variables — never in the config file:
-
-- `DBSYNC_SOURCE_CONN` — used by `inspect` and `extract`
-- `DBSYNC_TARGET_CONN` — used by `compare` and `transfer`
+`config.yaml` sets `source.engine`, `output.directory`, and `ignored_tables`. Connection strings are entered directly in the TUI and are never stored in config files.
 
 ### Transfer field mapping
 
