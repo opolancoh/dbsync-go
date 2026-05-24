@@ -40,7 +40,7 @@ func LoadSummary(backupDir string) (*Summary, error) {
 	return &manifest, nil
 }
 
-func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema, backupDir string) (*Summary, error) {
+func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema, backupDir string, onProgress func(table string, rows int, skipped bool)) (*Summary, error) {
 	manifest := &Summary{
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		Engine:    schema.Engine,
@@ -49,8 +49,6 @@ func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema
 	}
 
 	for _, table := range schema.Tables {
-		fmt.Printf("  Exporting %s...\n", table.Name)
-
 		rows, err := exportTable(ctx, adapter, table.Name, backupDir)
 		if err != nil {
 			return nil, fmt.Errorf("exporting table %s: %w", table.Name, err)
@@ -58,7 +56,9 @@ func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema
 
 		if rows == 0 {
 			manifest.SkippedTables = append(manifest.SkippedTables, table.Name)
-			fmt.Printf("  - %s — no rows, skipped\n\n", table.Name)
+			if onProgress != nil {
+				onProgress(table.Name, 0, true)
+			}
 			continue
 		}
 
@@ -68,7 +68,9 @@ func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema
 			File: table.Name + ".ndjson",
 		})
 
-		fmt.Printf("  ✓ %s — %d rows\n\n", table.Name, rows)
+		if onProgress != nil {
+			onProgress(table.Name, rows, false)
+		}
 	}
 
 	if err := saveSummary(manifest, backupDir); err != nil {
@@ -121,30 +123,3 @@ func saveSummary(manifest *Summary, backupDir string) error {
 	return nil
 }
 
-func Print(manifest *Summary, backupDir string) {
-	totalRows := 0
-	for _, t := range manifest.Tables {
-		totalRows += t.Rows
-	}
-
-	fmt.Println()
-	fmt.Println("Backup Summary")
-	fmt.Println("─────────────────────────────────────────────────────")
-	fmt.Printf("  Created at:   %s\n", manifest.CreatedAt)
-	fmt.Printf("  Tables:       %d\n", len(manifest.Tables))
-	fmt.Printf("  Total rows:   %d\n\n", totalRows)
-	for _, t := range manifest.Tables {
-		fmt.Printf("    %-40s %d rows\n", t.Name, t.Rows)
-	}
-	if len(manifest.SkippedTables) > 0 {
-		fmt.Println()
-		fmt.Printf("  Skipped (no rows):\n")
-		for _, name := range manifest.SkippedTables {
-			fmt.Printf("    %s\n", name)
-		}
-	}
-	fmt.Println()
-	fmt.Println("─────────────────────────────────────────────────────")
-	fmt.Printf("  Saved to: %s\n", filepath.Join(backupDir, "backup-manifest.yaml"))
-	fmt.Println("─────────────────────────────────────────────────────")
-}

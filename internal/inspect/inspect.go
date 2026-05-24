@@ -78,29 +78,6 @@ func Run(ctx context.Context, adapter adapters.DBAdapter, engine, host, database
 	return schema, nil
 }
 
-func Print(schema *Schema, outputPath string) {
-	fmt.Println("Results")
-	fmt.Println("─────────────────────────────────────────────────────")
-	fmt.Printf("  Captured at:  %s\n", schema.CapturedAt)
-	fmt.Printf("  Tables found: %d\n", len(schema.Tables))
-	fmt.Println()
-
-	for _, t := range schema.Tables {
-		fmt.Printf("  %s (%d fields)\n", t.Name, len(t.Fields))
-		for _, f := range t.Fields {
-			nullable := "not null"
-			if f.Nullable {
-				nullable = "nullable"
-			}
-			fmt.Printf("    %-30s %-20s %s\n", f.Name, f.Type, nullable)
-		}
-		fmt.Println()
-	}
-
-	fmt.Println("─────────────────────────────────────────────────────")
-	fmt.Printf("  Schema saved to: %s\n", outputPath)
-	fmt.Println("─────────────────────────────────────────────────────")
-}
 
 func save(schema *Schema, outputDir string) error {
 	if err := os.MkdirAll(outputDir, 0755); err != nil {

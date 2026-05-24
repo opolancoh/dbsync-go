@@ -131,50 +131,6 @@ func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema
 	return mapping, nil
 }
 
-func Print(mapping *Mapping, backupDir string) {
-	matched, unmatched := 0, 0
-	for _, t := range mapping.Tables {
-		if t.Status == StatusMatched {
-			matched++
-		} else {
-			unmatched++
-		}
-	}
-
-	fmt.Println()
-	fmt.Println("Analysis Summary")
-	fmt.Println("─────────────────────────────────────────────────────")
-	fmt.Printf("  Analyzed at:       %s\n", mapping.AnalyzedAt)
-	fmt.Printf("  Tables matched:    %d\n", matched)
-	fmt.Printf("  Tables unmatched:  %d\n\n", unmatched)
-
-	for _, t := range mapping.Tables {
-		targetName := "(unmatched)"
-		if t.Target != nil {
-			targetName = *t.Target
-		}
-		status := "✓"
-		if t.Status == StatusUnmatched {
-			status = "✗"
-		}
-		fmt.Printf("  %s [%-2d] %-30s → %s\n", status, t.Order, t.Source, targetName)
-
-		for _, f := range t.Fields {
-			if f.Status == StatusUnmatched {
-				targetField := "not found in target"
-				if f.Target != nil {
-					targetField = fmt.Sprintf("type mismatch: %s → %s", f.SourceType, *f.TargetType)
-				}
-				fmt.Printf("      ✗ %-28s %s\n", f.Source, targetField)
-			}
-		}
-	}
-
-	fmt.Println()
-	fmt.Println("─────────────────────────────────────────────────────")
-	fmt.Printf("  Mapping saved to: %s\n", filepath.Join(backupDir, "mapping.yaml"))
-	fmt.Println("─────────────────────────────────────────────────────")
-}
 
 func save(mapping *Mapping, backupDir string) error {
 	data, err := yaml.Marshal(mapping)

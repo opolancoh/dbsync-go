@@ -82,7 +82,24 @@ func runTransfer(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	toTransfer, toSkip := transfer.SortedPlan(mapping)
-	transfer.PrintPlan(toTransfer, toSkip)
+
+	fmt.Println("Transfer Plan")
+	fmt.Println("─────────────────────────────────────────────────────")
+	fmt.Printf("  Tables to transfer (%d):\n", len(toTransfer))
+	for _, t := range toTransfer {
+		fmt.Printf("    [%-2d] %s\n", t.Order, t.Source)
+	}
+	if len(toSkip) > 0 {
+		fmt.Printf("\n  Tables skipped (%d):\n", len(toSkip))
+		for _, t := range toSkip {
+			reason := "unmatched"
+			if t.Skip {
+				reason = "skipped"
+			}
+			fmt.Printf("    - %s (%s)\n", t.Source, reason)
+		}
+	}
+	fmt.Println("─────────────────────────────────────────────────────")
 	fmt.Println()
 
 	fmt.Print("Continue? (yes/no): ")
@@ -107,6 +124,15 @@ func runTransfer(cmd *cobra.Command, args []string) error {
 		ChunkSize:   transferChunkSize,
 		Truncate:    transferTruncate,
 		NoInterrupt: transferNoInterrupt,
+		OnProgress: func(table string, rows int, skipped bool, err error) {
+			if skipped {
+				fmt.Printf("  - %-35s skipped\n", table)
+			} else if err != nil {
+				fmt.Printf("  ✗ %-35s failed: %s\n", table, err)
+			} else {
+				fmt.Printf("  ✓ %-35s %d rows\n", table, rows)
+			}
+		},
 	}
 
 	fmt.Println("Transferring tables...")
@@ -117,7 +143,29 @@ func runTransfer(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("transfer failed: %w", err)
 	}
 
-	transfer.Print(summary)
+	totalRows := 0
+	transferred, skipped, failed := 0, 0, 0
+	for _, t := range summary.Tables {
+		if t.Skipped {
+			skipped++
+		} else if t.Err != nil {
+			failed++
+		} else {
+			transferred++
+			totalRows += t.Rows
+		}
+	}
+	fmt.Println()
+	fmt.Println("Transfer Summary")
+	fmt.Println("─────────────────────────────────────────────────────")
+	fmt.Printf("  Transferred at:     %s\n", summary.TransferredAt)
+	fmt.Printf("  Tables transferred: %d\n", transferred)
+	fmt.Printf("  Tables skipped:     %d\n", skipped)
+	if failed > 0 {
+		fmt.Printf("  Tables failed:      %d\n", failed)
+	}
+	fmt.Printf("  Total rows:         %d\n", totalRows)
+	fmt.Println("─────────────────────────────────────────────────────")
 
 	return nil
 }

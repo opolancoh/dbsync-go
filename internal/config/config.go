@@ -62,19 +62,3 @@ func (c *Config) Validate(requireSource, requireTarget bool) error {
 	return nil
 }
 
-func (c *Config) Print(host, dbName string, extras ...string) {
-	fmt.Println("Parameters")
-	fmt.Println("─────────────────────────────────────────────────────")
-	fmt.Printf("  Engine:         %s\n", c.Source.Engine)
-	fmt.Printf("  Host:           %s\n", host)
-	fmt.Printf("  Database:       %s\n", dbName)
-	fmt.Printf("  Output dir:     %s\n", c.Output.Directory)
-	if len(c.IgnoredTables) > 0 {
-		fmt.Printf("  Ignored tables: %s\n", strings.Join(c.IgnoredTables, ", "))
-	}
-	for i := 0; i+1 < len(extras); i += 2 {
-		fmt.Printf("  %-16s%s\n", extras[i]+":", extras[i+1])
-	}
-	fmt.Println("─────────────────────────────────────────────────────")
-	fmt.Println()
-}

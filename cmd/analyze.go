@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/opolancoh/dbsync/internal/analyze"
 	"github.com/opolancoh/dbsync/internal/backup"
@@ -93,7 +94,44 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("analyze failed: %w", err)
 	}
 
-	analyze.Print(mapping, analyzeBackupDir)
+	matched, unmatched := 0, 0
+	for _, t := range mapping.Tables {
+		if t.Status == analyze.StatusMatched {
+			matched++
+		} else {
+			unmatched++
+		}
+	}
+	fmt.Println()
+	fmt.Println("Analysis Summary")
+	fmt.Println("─────────────────────────────────────────────────────")
+	fmt.Printf("  Analyzed at:       %s\n", mapping.AnalyzedAt)
+	fmt.Printf("  Tables matched:    %d\n", matched)
+	fmt.Printf("  Tables unmatched:  %d\n\n", unmatched)
+	for _, t := range mapping.Tables {
+		targetName := "(unmatched)"
+		if t.Target != nil {
+			targetName = *t.Target
+		}
+		status := "✓"
+		if t.Status == analyze.StatusUnmatched {
+			status = "✗"
+		}
+		fmt.Printf("  %s [%-2d] %-30s → %s\n", status, t.Order, t.Source, targetName)
+		for _, f := range t.Fields {
+			if f.Status == analyze.StatusUnmatched {
+				targetField := "not found in target"
+				if f.Target != nil {
+					targetField = fmt.Sprintf("type mismatch: %s → %s", f.SourceType, *f.TargetType)
+				}
+				fmt.Printf("      ✗ %-28s %s\n", f.Source, targetField)
+			}
+		}
+	}
+	fmt.Println()
+	fmt.Println("─────────────────────────────────────────────────────")
+	fmt.Printf("  Mapping saved to: %s\n", filepath.Join(analyzeBackupDir, "mapping.yaml"))
+	fmt.Println("─────────────────────────────────────────────────────")
 
 	return nil
 }

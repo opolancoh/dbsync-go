@@ -19,6 +19,7 @@ type Options struct {
 	ChunkSize   int
 	Truncate    bool
 	NoInterrupt bool
+	OnProgress  func(table string, rows int, skipped bool, err error)
 }
 
 type TableResult struct {
@@ -66,28 +67,6 @@ func SortedPlan(mapping *analyze.Mapping) (toTransfer, toSkip []analyze.TableMap
 	return
 }
 
-func PrintPlan(toTransfer, toSkip []analyze.TableMapping) {
-	fmt.Println("Transfer Plan")
-	fmt.Println("─────────────────────────────────────────────────────")
-
-	fmt.Printf("  Tables to transfer (%d):\n", len(toTransfer))
-	for _, t := range toTransfer {
-		fmt.Printf("    [%-2d] %s\n", t.Order, t.Source)
-	}
-
-	if len(toSkip) > 0 {
-		fmt.Printf("\n  Tables skipped (%d):\n", len(toSkip))
-		for _, t := range toSkip {
-			reason := "unmatched"
-			if t.Skip {
-				reason = "skipped"
-			}
-			fmt.Printf("    - %s (%s)\n", t.Source, reason)
-		}
-	}
-
-	fmt.Println("─────────────────────────────────────────────────────")
-}
 
 func Run(ctx context.Context, adapter adapters.DBAdapter, mapping *analyze.Mapping, backupDir string, opts Options) (*Summary, error) {
 	summary := &Summary{
@@ -101,54 +80,62 @@ func Run(ctx context.Context, adapter adapters.DBAdapter, mapping *analyze.Mappi
 		if t.Skip {
 			reason = "skipped"
 		}
-		fmt.Printf("  - %-35s skipped (%s)\n", t.Source, reason)
 		summary.Tables = append(summary.Tables, TableResult{
 			Name:    t.Source,
 			Skipped: true,
 			Reason:  reason,
 		})
+		if opts.OnProgress != nil {
+			opts.OnProgress(t.Source, 0, true, nil)
+		}
 	}
 
 	for _, tableMapping := range toTransfer {
 		ndjsonPath := filepath.Join(backupDir, tableMapping.Source+".ndjson")
 		if _, err := os.Stat(ndjsonPath); os.IsNotExist(err) {
-			fmt.Printf("  - %-35s skipped (no data)\n", tableMapping.Source)
 			summary.Tables = append(summary.Tables, TableResult{
 				Name:    tableMapping.Source,
 				Skipped: true,
 				Reason:  "no data (empty table)",
 			})
+			if opts.OnProgress != nil {
+				opts.OnProgress(tableMapping.Source, 0, true, nil)
+			}
 			continue
 		}
 
-		fmt.Printf("  → Transferring %-25s", tableMapping.Source+"...")
-
 		if opts.Truncate {
 			if err := adapter.TruncateTable(ctx, *tableMapping.Target); err != nil {
-				fmt.Printf("\r  ✗ %-35s failed: %s\n", tableMapping.Source, err)
 				if !opts.NoInterrupt {
 					return nil, fmt.Errorf("truncating table %s: %w", tableMapping.Source, err)
 				}
 				summary.Tables = append(summary.Tables, TableResult{Name: *tableMapping.Target, Err: err})
+				if opts.OnProgress != nil {
+					opts.OnProgress(tableMapping.Source, 0, false, err)
+				}
 				continue
 			}
 		}
 
 		rows, err := transferTable(ctx, adapter, tableMapping, ndjsonPath, opts.ChunkSize)
 		if err != nil {
-			fmt.Printf("\r  ✗ %-35s failed: %s\n", tableMapping.Source, err)
 			if !opts.NoInterrupt {
 				return nil, fmt.Errorf("transferring table %s: %w", tableMapping.Source, err)
 			}
 			summary.Tables = append(summary.Tables, TableResult{Name: *tableMapping.Target, Err: err})
+			if opts.OnProgress != nil {
+				opts.OnProgress(tableMapping.Source, 0, false, err)
+			}
 			continue
 		}
 
-		fmt.Printf("\r  ✓ %-35s %d rows\n", tableMapping.Source, rows)
 		summary.Tables = append(summary.Tables, TableResult{
 			Name: *tableMapping.Target,
 			Rows: rows,
 		})
+		if opts.OnProgress != nil {
+			opts.OnProgress(tableMapping.Source, rows, false, nil)
+		}
 	}
 
 	return summary, nil
@@ -210,31 +197,3 @@ func transferTable(ctx context.Context, adapter adapters.DBAdapter, tableMapping
 	return totalRows, nil
 }
 
-func Print(summary *Summary) {
-	totalRows := 0
-	transferred := 0
-	skipped := 0
-	failed := 0
-	for _, t := range summary.Tables {
-		if t.Skipped {
-			skipped++
-		} else if t.Err != nil {
-			failed++
-		} else {
-			transferred++
-			totalRows += t.Rows
-		}
-	}
-
-	fmt.Println()
-	fmt.Println("Transfer Summary")
-	fmt.Println("─────────────────────────────────────────────────────")
-	fmt.Printf("  Transferred at:    %s\n", summary.TransferredAt)
-	fmt.Printf("  Tables transferred: %d\n", transferred)
-	fmt.Printf("  Tables skipped:    %d\n", skipped)
-	if failed > 0 {
-		fmt.Printf("  Tables failed:     %d\n", failed)
-	}
-	fmt.Printf("  Total rows:        %d\n", totalRows)
-	fmt.Println("─────────────────────────────────────────────────────")
-}

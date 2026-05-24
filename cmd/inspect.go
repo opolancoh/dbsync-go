@@ -47,7 +47,17 @@ func runInspect(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("parsing connection string: %w", err)
 	}
-	cfg.Print(host, dbName)
+	fmt.Println("Parameters")
+	fmt.Println("─────────────────────────────────────────────────────")
+	fmt.Printf("  Engine:         %s\n", cfg.Source.Engine)
+	fmt.Printf("  Host:           %s\n", host)
+	fmt.Printf("  Database:       %s\n", dbName)
+	fmt.Printf("  Output dir:     %s\n", cfg.Output.Directory)
+	if len(cfg.IgnoredTables) > 0 {
+		fmt.Printf("  Ignored tables: %s\n", strings.Join(cfg.IgnoredTables, ", "))
+	}
+	fmt.Println("─────────────────────────────────────────────────────")
+	fmt.Println()
 
 	ctx := context.Background()
 
@@ -64,7 +74,25 @@ func runInspect(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("inspect failed: %w", err)
 	}
 
-	inspect.Print(schema, inspect.OutputPath(outputDir))
+	fmt.Println("Results")
+	fmt.Println("─────────────────────────────────────────────────────")
+	fmt.Printf("  Captured at:  %s\n", schema.CapturedAt)
+	fmt.Printf("  Tables found: %d\n", len(schema.Tables))
+	fmt.Println()
+	for _, t := range schema.Tables {
+		fmt.Printf("  %s (%d fields)\n", t.Name, len(t.Fields))
+		for _, f := range t.Fields {
+			nullable := "not null"
+			if f.Nullable {
+				nullable = "nullable"
+			}
+			fmt.Printf("    %-30s %-20s %s\n", f.Name, f.Type, nullable)
+		}
+		fmt.Println()
+	}
+	fmt.Println("─────────────────────────────────────────────────────")
+	fmt.Printf("  Schema saved to: %s\n", inspect.OutputPath(outputDir))
+	fmt.Println("─────────────────────────────────────────────────────")
 
 	return nil
 }

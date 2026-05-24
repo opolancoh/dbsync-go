@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
 	"github.com/opolancoh/dbsync/internal/backup"
 	"github.com/opolancoh/dbsync/internal/config"
@@ -47,7 +48,15 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading schema: %w", err)
 	}
 
-	cfg.Print(schema.Host, schema.Database, "Schema", backupDir+"/schema.yaml")
+	fmt.Println("Parameters")
+	fmt.Println("─────────────────────────────────────────────────────")
+	fmt.Printf("  Engine:         %s\n", cfg.Source.Engine)
+	fmt.Printf("  Host:           %s\n", schema.Host)
+	fmt.Printf("  Database:       %s\n", schema.Database)
+	fmt.Printf("  Output dir:     %s\n", cfg.Output.Directory)
+	fmt.Printf("  Schema:         %s\n", backupDir+"/schema.yaml")
+	fmt.Println("─────────────────────────────────────────────────────")
+	fmt.Println()
 
 	ctx := context.Background()
 
@@ -60,12 +69,41 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	fmt.Println("Exporting tables...")
 	fmt.Println()
 
-	manifest, err := backup.Run(ctx, adapter, schema, backupDir)
+	manifest, err := backup.Run(ctx, adapter, schema, backupDir, func(table string, rows int, skipped bool) {
+		if skipped {
+			fmt.Printf("  - %-40s no rows, skipped\n", table)
+		} else {
+			fmt.Printf("  ✓ %-40s %d rows\n", table, rows)
+		}
+	})
 	if err != nil {
 		return fmt.Errorf("backup failed: %w", err)
 	}
 
-	backup.Print(manifest, backupDir)
+	totalRows := 0
+	for _, t := range manifest.Tables {
+		totalRows += t.Rows
+	}
+	fmt.Println()
+	fmt.Println("Backup Summary")
+	fmt.Println("─────────────────────────────────────────────────────")
+	fmt.Printf("  Created at:   %s\n", manifest.CreatedAt)
+	fmt.Printf("  Tables:       %d\n", len(manifest.Tables))
+	fmt.Printf("  Total rows:   %d\n\n", totalRows)
+	for _, t := range manifest.Tables {
+		fmt.Printf("    %-40s %d rows\n", t.Name, t.Rows)
+	}
+	if len(manifest.SkippedTables) > 0 {
+		fmt.Println()
+		fmt.Printf("  Skipped (no rows):\n")
+		for _, name := range manifest.SkippedTables {
+			fmt.Printf("    %s\n", name)
+		}
+	}
+	fmt.Println()
+	fmt.Println("─────────────────────────────────────────────────────")
+	fmt.Printf("  Saved to: %s\n", filepath.Join(backupDir, "backup-manifest.yaml"))
+	fmt.Println("─────────────────────────────────────────────────────")
 
 	return nil
 }
