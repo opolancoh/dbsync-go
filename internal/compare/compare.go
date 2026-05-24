@@ -131,6 +131,10 @@ func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema
 	return mapping, nil
 }
 
+func Save(mapping *Mapping, outputDir string) error {
+	return save(mapping, outputDir)
+}
+
 func save(mapping *Mapping, outputDir string) error {
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return fmt.Errorf("creating output directory: %w", err)

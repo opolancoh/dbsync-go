@@ -139,7 +139,7 @@ func (a *PostgresAdapter) InsertRows(ctx context.Context, table string, rows []m
 		colIdents[i] = fmt.Sprintf("%q", col)
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 	}
-	sql := fmt.Sprintf("INSERT INTO %q (%s) VALUES (%s)",
+	sql := fmt.Sprintf("INSERT INTO %q (%s) VALUES (%s) ON CONFLICT DO NOTHING",
 		table,
 		strings.Join(colIdents, ", "),
 		strings.Join(placeholders, ", "))

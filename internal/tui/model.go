@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -66,7 +67,6 @@ type backupProgressMsg struct {
 type backupDoneMsg struct{ manifest *extract.Summary }
 
 type analyzeDoneMsg struct {
-	adapter adapters.DBAdapter
 	mapping *compare.Mapping
 }
 
@@ -77,7 +77,10 @@ type transferProgressMsg struct {
 	err     error
 }
 
-type transferDoneMsg struct{ summary *transfer.Summary }
+type transferDoneMsg struct {
+	summary *transfer.Summary
+	logPath string
+}
 
 type connTestDoneMsg struct{ err error }
 
@@ -110,10 +113,8 @@ type Model struct {
 	cancel context.CancelFunc
 	cfg    *config.Config
 
-	// source adapter: created in inspect, used in backup
-	// target adapter: created in analyze, used in transfer
+	// source adapter: created in inspect, closed after extract
 	srcAdapter adapters.DBAdapter
-	tgtAdapter adapters.DBAdapter
 
 	// step results
 	backupDir string
@@ -121,10 +122,15 @@ type Model struct {
 	manifest  *extract.Summary
 	mapping   *compare.Mapping
 	summary   *transfer.Summary
+	logPath   string
 
-	// streaming: backup and transfer send per-table messages over this channel
-	progressCh <-chan tea.Msg
-	logs       []string
+	// reorder cursor: index into mapping.Tables on the compare screen
+	cursor int
+
+	// streaming progress
+	progressCh       <-chan tea.Msg
+	logs             []string                       // extract step lines
+	transferProgress map[string]transferProgressMsg // transfer step per-table results
 
 	spinner spinner.Model
 	width   int
@@ -195,6 +201,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cancel()
 				return m, tea.Quit
 			}
+		case "r":
+			if m.step == stepDone {
+				m.step = stepAnalyze
+				m.running = false
+				m.logs = nil
+				m.summary = nil
+				m.logPath = ""
+				m.transferProgress = nil
+				return m, nil
+			}
 		case "enter":
 			if m.step == stepConfig && !m.running {
 				return m.updateConfig(msg)
@@ -202,7 +218,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.running && m.err == nil {
 				return m.advance()
 			}
-		case "tab", "shift+tab", "up", "down":
+		case "up":
+			if m.step == stepConfig && !m.running {
+				return m.updateConfig(msg)
+			}
+			if m.step == stepAnalyze && m.mapping != nil && !m.running && m.cursor > 0 {
+				m.cursor--
+			}
+		case "down":
+			if m.step == stepConfig && !m.running {
+				return m.updateConfig(msg)
+			}
+			if m.step == stepAnalyze && m.mapping != nil && !m.running && m.cursor < len(m.mapping.Tables)-1 {
+				m.cursor++
+			}
+		case "+":
+			if m.step == stepAnalyze && m.mapping != nil && !m.running && m.cursor > 0 {
+				i := m.cursor
+				m.mapping.Tables[i], m.mapping.Tables[i-1] = m.mapping.Tables[i-1], m.mapping.Tables[i]
+				m.mapping.Tables[i].Order, m.mapping.Tables[i-1].Order = m.mapping.Tables[i-1].Order, m.mapping.Tables[i].Order
+				m.cursor--
+			}
+		case "-":
+			if m.step == stepAnalyze && m.mapping != nil && !m.running && m.cursor < len(m.mapping.Tables)-1 {
+				i := m.cursor
+				m.mapping.Tables[i], m.mapping.Tables[i+1] = m.mapping.Tables[i+1], m.mapping.Tables[i]
+				m.mapping.Tables[i].Order, m.mapping.Tables[i+1].Order = m.mapping.Tables[i+1].Order, m.mapping.Tables[i].Order
+				m.cursor++
+			}
+		case "tab", "shift+tab":
 			if m.step == stepConfig && !m.running {
 				return m.updateConfig(msg)
 			}
@@ -252,23 +296,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.spinner.Tick, m.cmdInspect())
 
 	case analyzeDoneMsg:
-		m.tgtAdapter = msg.adapter
 		m.mapping = msg.mapping
+		m.cursor = 0
 		m.running = false
 		return m, nil
 
 	case transferProgressMsg:
-		if msg.skipped {
-			m.logs = append(m.logs, dimStyle.Render(fmt.Sprintf("  - %-38s skipped", msg.table)))
-		} else if msg.err != nil {
-			m.logs = append(m.logs, errStyle.Render(fmt.Sprintf("  ✗ %-38s failed: %s", msg.table, msg.err)))
-		} else {
-			m.logs = append(m.logs, successStyle.Render(fmt.Sprintf("  ✓ %-38s %d rows", msg.table, msg.rows)))
-		}
+		m.transferProgress[msg.table] = msg
 		return m, listenForProgress(m.progressCh)
 
 	case transferDoneMsg:
 		m.summary = msg.summary
+		m.logPath = msg.logPath
 		m.running = false
 		m.step = stepDone
 		m.closeAdapters()
@@ -325,6 +364,11 @@ func (m Model) submitConfig() (tea.Model, tea.Cmd) {
 	cfg.SourceConn = sourceConn
 	cfg.TargetConn = targetConn
 
+	if sourceConn != "" && targetConn != "" && sourceConn == targetConn {
+		m.err = fmt.Errorf("source and target connections must be different")
+		return m, nil
+	}
+
 	if err := cfg.Validate(true, true); err != nil {
 		m.err = err
 		return m, nil
@@ -347,8 +391,10 @@ func (m Model) advance() (tea.Model, tea.Cmd) {
 		ch := make(chan tea.Msg, 50)
 		m.progressCh = ch
 		ctx, adapter, schema := m.ctx, m.srcAdapter, m.schema
+		m.srcAdapter = nil
 		extractDir := filepath.Join(m.backupDir, "02-extract")
 		go func() {
+			defer adapter.Close(ctx)
 			manifest, err := extract.Run(ctx, adapter, schema, extractDir, func(table string, rows int, skipped bool) {
 				ch <- backupProgressMsg{table: table, rows: rows, skipped: skipped}
 			})
@@ -368,14 +414,28 @@ func (m Model) advance() (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.spinner.Tick, m.cmdAnalyze())
 
 	case stepAnalyze:
+		if err := compare.Save(m.mapping, filepath.Join(m.backupDir, "03-compare")); err != nil {
+			m.err = fmt.Errorf("saving mapping: %w", err)
+			return m, nil
+		}
 		m.step = stepTransfer
 		m.running = true
 		m.logs = nil
+		m.transferProgress = make(map[string]transferProgressMsg)
 		ch := make(chan tea.Msg, 50)
 		m.progressCh = ch
-		ctx, adapter, mapping := m.ctx, m.tgtAdapter, m.mapping
-		extractDir := filepath.Join(m.backupDir, "02-extract")
+		ctx, cfg, mapping := m.ctx, m.cfg, m.mapping
+		backupDir := m.backupDir
+		extractDir := filepath.Join(backupDir, "02-extract")
 		go func() {
+			tgtAdapter, err := adapters.NewPostgresAdapter(ctx, cfg.TargetConn)
+			if err != nil {
+				ch <- errMsg{fmt.Errorf("connecting to target: %w", err)}
+				close(ch)
+				return
+			}
+			defer tgtAdapter.Close(ctx)
+
 			opts := transfer.Options{
 				ChunkSize:   500,
 				NoInterrupt: true,
@@ -383,12 +443,14 @@ func (m Model) advance() (tea.Model, tea.Cmd) {
 					ch <- transferProgressMsg{table: table, rows: rows, skipped: skipped, err: err}
 				},
 			}
-			summary, err := transfer.Run(ctx, adapter, mapping, extractDir, opts)
+			summary, err := transfer.Run(ctx, tgtAdapter, mapping, extractDir, opts)
 			if err != nil {
 				ch <- errMsg{fmt.Errorf("transfer: %w", err)}
-			} else {
-				ch <- transferDoneMsg{summary: summary}
+				close(ch)
+				return
 			}
+			logPath := writeTransferLog(summary, filepath.Join(backupDir, "04-transfer"))
+			ch <- transferDoneMsg{summary: summary, logPath: logPath}
 			close(ch)
 		}()
 		return m, listenForProgress(m.progressCh)
@@ -406,10 +468,6 @@ func (m *Model) closeAdapters() {
 	if m.srcAdapter != nil {
 		m.srcAdapter.Close(m.ctx)
 		m.srcAdapter = nil
-	}
-	if m.tgtAdapter != nil {
-		m.tgtAdapter.Close(m.ctx)
-		m.tgtAdapter = nil
 	}
 }
 
@@ -451,12 +509,12 @@ func (m Model) cmdAnalyze() tea.Cmd {
 		}
 
 		mapping, err := compare.Run(ctx, adapter, schema, filepath.Join(backupDir, "03-compare"), skippedTables)
+		adapter.Close(ctx)
 		if err != nil {
-			adapter.Close(ctx)
 			return errMsg{fmt.Errorf("analyze: %w", err)}
 		}
 
-		return analyzeDoneMsg{adapter: adapter, mapping: mapping}
+		return analyzeDoneMsg{mapping: mapping}
 	}
 }
 
@@ -575,9 +633,13 @@ func (m Model) viewConfig() string {
 			b.WriteString(helpStyle.Render("    Hint: append ?sslmode=disable to the connection string") + "\n")
 		}
 		b.WriteString("\n")
-		b.WriteString(helpStyle.Render("  [tab] next field   [enter] retry   [ctrl+c] quit") + "\n")
+		b.WriteString(helpStyle.Render("  [tab] next field") + "\n")
+		b.WriteString(helpStyle.Render("  [enter] retry") + "\n")
+		b.WriteString(helpStyle.Render("  [ctrl+c] quit") + "\n")
 	default:
-		b.WriteString(helpStyle.Render("  [tab] next field   [enter] confirm field / start   [ctrl+c] quit") + "\n")
+		b.WriteString(helpStyle.Render("  [tab] next field") + "\n")
+		b.WriteString(helpStyle.Render("  [enter] confirm field / start") + "\n")
+		b.WriteString(helpStyle.Render("  [ctrl+c] quit") + "\n")
 	}
 
 	return b.String()
@@ -603,7 +665,8 @@ func (m Model) viewInspect() string {
 			b.WriteString(dimStyle.Render(fmt.Sprintf("    %-35s %d fields", t.Name, len(t.Fields))) + "\n")
 		}
 		b.WriteString("\n")
-		b.WriteString(helpStyle.Render("  [enter] start extract   [q] quit") + "\n")
+		b.WriteString(helpStyle.Render("  [enter] start extract") + "\n")
+		b.WriteString(helpStyle.Render("  [q] quit") + "\n")
 	}
 
 	return b.String()
@@ -638,7 +701,8 @@ func (m Model) viewExtract() string {
 	}
 
 	if m.manifest != nil {
-		b.WriteString(helpStyle.Render("  [enter] start compare   [q] quit") + "\n")
+		b.WriteString(helpStyle.Render("  [enter] start compare") + "\n")
+		b.WriteString(helpStyle.Render("  [q] quit") + "\n")
 	}
 
 	return b.String()
@@ -676,29 +740,36 @@ func (m Model) viewCompare() string {
 	}
 
 	if m.mapping != nil {
-		for _, t := range m.mapping.Tables {
+		for i, t := range m.mapping.Tables {
 			targetName := "(unmatched)"
 			if t.Target != nil {
 				targetName = *t.Target
 			}
-			icon := successStyle.Render("✓")
+			matchIcon := successStyle.Render("✓")
 			if t.Status == compare.StatusUnmatched {
-				icon = warnStyle.Render("✗")
+				matchIcon = warnStyle.Render("✗")
 			}
-			b.WriteString(fmt.Sprintf("  %s [%-2d] %-30s → %s\n", icon, t.Order, t.Source, targetName))
+			cursor := " "
+			if i == m.cursor {
+				cursor = activeStyle.Render("▶")
+			}
+			b.WriteString(fmt.Sprintf("  %s %s [%03d] %-30s → %s\n", cursor, matchIcon, t.Order, t.Source, targetName))
 			for _, f := range t.Fields {
 				if f.Status == compare.StatusUnmatched {
 					detail := "not found in target"
 					if f.Target != nil {
 						detail = fmt.Sprintf("type mismatch: %s → %s", f.SourceType, *f.TargetType)
 					}
-					b.WriteString(dimStyle.Render(fmt.Sprintf("        ✗ %-28s %s", f.Source, detail)) + "\n")
+					b.WriteString(dimStyle.Render(fmt.Sprintf("          ✗ %-28s %s", f.Source, detail)) + "\n")
 				}
 			}
 		}
 		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("  Mapping: "+filepath.Join(m.backupDir, "03-compare", "mapping.yaml")) + "\n\n")
-		b.WriteString(helpStyle.Render("  [enter] start transfer   [q] quit") + "\n")
+		b.WriteString(helpStyle.Render("  Reorder tables to satisfy foreign key dependencies before transferring.") + "\n\n")
+		b.WriteString(helpStyle.Render("  [↑↓] select") + "\n")
+		b.WriteString(helpStyle.Render("  [+/-] reorder") + "\n")
+		b.WriteString(helpStyle.Render("  [enter] start transfer") + "\n")
+		b.WriteString(helpStyle.Render("  [q] quit") + "\n")
 	}
 
 	return b.String()
@@ -707,12 +778,36 @@ func (m Model) viewCompare() string {
 func (m Model) viewTransfer() string {
 	var b strings.Builder
 
-	for _, line := range m.logs {
-		b.WriteString(line + "\n")
+	if m.mapping != nil {
+		toTransfer, toSkip := transfer.SortedPlan(m.mapping)
+		for _, t := range toTransfer {
+			prog, done := m.transferProgress[t.Source]
+			var icon, detail string
+			switch {
+			case done && prog.err != nil:
+				icon = errStyle.Render("✗")
+				detail = errStyle.Render(prog.err.Error())
+			case done:
+				icon = successStyle.Render("✓")
+				detail = successStyle.Render(fmt.Sprintf("%d rows", prog.rows))
+			default:
+				icon = dimStyle.Render("·")
+				detail = dimStyle.Render("pending")
+			}
+			b.WriteString(fmt.Sprintf("  %s %-38s %s\n", icon, t.Source, detail))
+		}
+		for _, t := range toSkip {
+			reason := "unmatched"
+			if t.Skip {
+				reason = "skipped"
+			}
+			b.WriteString(fmt.Sprintf("  %s %-38s %s\n", dimStyle.Render("-"), t.Source, dimStyle.Render(reason)))
+		}
+		b.WriteString("\n")
 	}
 
 	if m.running {
-		b.WriteString("  " + m.spinner.View() + "\n")
+		b.WriteString("  " + m.spinner.View() + " Transferring...\n")
 	}
 
 	return b.String()
@@ -720,6 +815,30 @@ func (m Model) viewTransfer() string {
 
 func (m Model) viewDone() string {
 	var b strings.Builder
+
+	if m.mapping != nil {
+		toTransfer, toSkip := transfer.SortedPlan(m.mapping)
+		for _, t := range toTransfer {
+			prog := m.transferProgress[t.Source]
+			var icon, detail string
+			if prog.err != nil {
+				icon = errStyle.Render("✗")
+				detail = errStyle.Render(prog.err.Error())
+			} else {
+				icon = successStyle.Render("✓")
+				detail = successStyle.Render(fmt.Sprintf("%d rows", prog.rows))
+			}
+			b.WriteString(fmt.Sprintf("  %s %-38s %s\n", icon, t.Source, detail))
+		}
+		for _, t := range toSkip {
+			reason := "unmatched"
+			if t.Skip {
+				reason = "skipped"
+			}
+			b.WriteString(fmt.Sprintf("  %s %-38s %s\n", dimStyle.Render("-"), t.Source, dimStyle.Render(reason)))
+		}
+		b.WriteString("\n")
+	}
 
 	transferred, skipped, failed, totalRows := 0, 0, 0, 0
 	if m.summary != nil {
@@ -736,24 +855,87 @@ func (m Model) viewDone() string {
 		}
 	}
 
+	if m.schema != nil {
+		b.WriteString(fmt.Sprintf("  %-16s %s @ %s\n", "Source DB:", m.schema.Database, m.schema.Host))
+	}
 	if m.cfg != nil {
 		tgtDB, _ := dbNameFromConn(m.cfg.TargetConn)
 		tgtHost, _ := hostFromConn(m.cfg.TargetConn)
 		b.WriteString(fmt.Sprintf("  %-16s %s @ %s\n", "Target DB:", tgtDB, tgtHost))
 	}
-	b.WriteString(fmt.Sprintf("  %-16s %d\n", "Transferred:", transferred))
-	b.WriteString(fmt.Sprintf("  %-16s %d\n", "Rows:", totalRows))
+	b.WriteString(fmt.Sprintf("  %-20s %d\n", "Tables transferred:", transferred))
+	b.WriteString(fmt.Sprintf("  %-20s %d\n", "Rows transferred:", totalRows))
 	if skipped > 0 {
-		b.WriteString(dimStyle.Render(fmt.Sprintf("  %-16s %d", "Skipped:", skipped)) + "\n")
+		b.WriteString(dimStyle.Render(fmt.Sprintf("  %-20s %d", "Tables skipped:", skipped)) + "\n")
 	}
 	if failed > 0 {
-		b.WriteString(errStyle.Render(fmt.Sprintf("  %-16s %d", "Failed:", failed)) + "\n")
+		b.WriteString(errStyle.Render(fmt.Sprintf("  %-20s %d", "Tables failed:", failed)) + "\n")
 	}
 	b.WriteString("\n")
 	b.WriteString(successStyle.Render("  ✓ Done") + "\n\n")
-	b.WriteString(helpStyle.Render("  [enter] or [q] to exit") + "\n")
+	if m.logPath != "" {
+		b.WriteString(dimStyle.Render("  Log: "+m.logPath) + "\n")
+	}
+	b.WriteString(helpStyle.Render("  [r] retry transfer") + "\n")
+	b.WriteString(helpStyle.Render("  [enter] / [q] exit") + "\n")
 
 	return b.String()
+}
+
+// ── Transfer log ─────────────────────────────────────────────────────────────
+
+func writeTransferLog(summary *transfer.Summary, dir string) string {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return ""
+	}
+	logPath := filepath.Join(dir, "transfer.log")
+	f, err := os.Create(logPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	fmt.Fprintf(f, "Transfer Log\n")
+	fmt.Fprintf(f, "============\n")
+	fmt.Fprintf(f, "Transferred at: %s\n\n", summary.TransferredAt)
+
+	var ok, skipped, failed []transfer.TableResult
+	for _, t := range summary.Tables {
+		switch {
+		case t.Skipped:
+			skipped = append(skipped, t)
+		case t.Err != nil:
+			failed = append(failed, t)
+		default:
+			ok = append(ok, t)
+		}
+	}
+
+	totalRows := 0
+	for _, t := range ok {
+		totalRows += t.Rows
+	}
+
+	fmt.Fprintf(f, "TRANSFERRED (%d tables, %d rows):\n", len(ok), totalRows)
+	for _, t := range ok {
+		fmt.Fprintf(f, "  ✓ %-40s %d rows\n", t.Name, t.Rows)
+	}
+
+	if len(skipped) > 0 {
+		fmt.Fprintf(f, "\nSKIPPED (%d tables):\n", len(skipped))
+		for _, t := range skipped {
+			fmt.Fprintf(f, "  - %-40s %s\n", t.Name, t.Reason)
+		}
+	}
+
+	if len(failed) > 0 {
+		fmt.Fprintf(f, "\nFAILED (%d tables):\n", len(failed))
+		for _, t := range failed {
+			fmt.Fprintf(f, "  ✗ %-40s %s\n", t.Name, t.Err)
+		}
+	}
+
+	return logPath
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

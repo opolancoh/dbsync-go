@@ -9,14 +9,10 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "dbsync",
-	Short: "Database backup and restore tool",
+	Short: "Database migration tool",
 }
 
 func main() {
-	rootCmd.AddCommand(inspectCmd)
-	rootCmd.AddCommand(extractCmd)
-	rootCmd.AddCommand(compareCmd)
-	rootCmd.AddCommand(transferCmd)
 	rootCmd.AddCommand(tuiCmd)
 
 	if err := rootCmd.Execute(); err != nil {
