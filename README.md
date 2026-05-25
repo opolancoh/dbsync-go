@@ -202,6 +202,107 @@ tables:
 
 ---
 
+## Backup (scheduled / automated)
+
+The `backup` command runs inspect + extract non-interactively, printing progress to stdout and exiting non-zero on failure. It is designed to be called from a cron job or script — no TUI, no prompts.
+
+### Usage
+
+```bash
+DBSYNC_SOURCE_CONN="postgres://user:password@host:5432/dbname" \
+./dbsync backup --config ./config.yaml
+```
+
+Output is printed to stdout:
+
+```
+Source:  mydb @ host:5432
+
+Inspecting schema...
+  42 tables found
+
+Extracting data...
+  ✓ Tenants                                  12 rows
+  ✓ AspNetUsers                              84 rows
+  - AuditLogs                                no rows, skipped
+  ...
+
+Done.
+  Tables exported: 38 (21504 rows)
+  Tables skipped:  4 (no rows)
+  Output:          ./backups/2026-05-25T02-00-00Z_mydb
+```
+
+Each run creates a new timestamped directory with the same structure as the TUI workflow:
+
+```
+backups/
+  2026-05-25T02-00-00Z_mydb/
+    01-inspect/
+      schema.yaml
+    02-extract/
+      extract-manifest.yaml
+      Tenants.ndjson
+      AspNetUsers.ndjson
+      ...
+```
+
+These files can be used directly as input for the TUI's compare and transfer steps.
+
+---
+
+### Running as a cron job on Linux
+
+**1. Place the binary and config in a fixed location**
+
+```
+/opt/dbsync/
+  dbsync        ← the binary
+  config.yaml   ← tool configuration
+  backups/      ← backup output (set output.directory to this path in config.yaml)
+```
+
+**2. Create a wrapper script `/opt/dbsync/backup.sh`**
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+export DBSYNC_SOURCE_CONN="postgres://user:password@host:5432/dbname"
+
+/opt/dbsync/dbsync backup --config /opt/dbsync/config.yaml
+```
+
+```bash
+chmod +x /opt/dbsync/backup.sh
+```
+
+**3. Schedule it with cron**
+
+Open the crontab editor:
+
+```bash
+crontab -e
+```
+
+Add a line to run the backup daily at 2:00 AM and append all output to a log file:
+
+```cron
+0 2 * * * /opt/dbsync/backup.sh >> /var/log/dbsync-backup.log 2>&1
+```
+
+The job exits non-zero on failure. Most monitoring systems (cron mail, Healthchecks.io, Grafana alerts) can detect this and send a notification.
+
+**4. Rotate old backups**
+
+To keep only the last 30 days of backups, add a cleanup line to `backup.sh` before the dbsync call:
+
+```bash
+find /opt/dbsync/backups -maxdepth 1 -mindepth 1 -type d -mtime +30 -exec rm -rf {} +
+```
+
+---
+
 ## Building
 
 Requires [Go 1.21+](https://golang.org/dl/).

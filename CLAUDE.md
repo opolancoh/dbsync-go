@@ -29,8 +29,9 @@ The four-step pipeline (`inspect → extract → compare → transfer`) maps to 
 
 ```
 cmd/
-  main.go     ← registers tuiCmd only
+  main.go     ← registers tuiCmd and backupCmd
   tui.go      ← runs tui.New() with tea.WithAltScreen()
+  backup.go   ← headless inspect+extract for scheduled backups
 internal/
   tui/        ← Bubble Tea model; drives the full pipeline interactively
   adapters/   ← DBAdapter interface + PostgreSQL implementation
@@ -50,6 +51,10 @@ Each pipeline step writes files into a timestamped directory (`{timestamp}_{dbna
   03-compare/   mapping.yaml
   04-transfer/  transfer.log
 ```
+
+### backup command (cmd/backup.go)
+
+Non-interactive command that runs inspect + extract sequentially and prints progress to stdout. Uses `DBSYNC_SOURCE_CONN` env var for the connection. Exits non-zero on any error, making it suitable for cron jobs. Reuses the same `inspect.Run` and `extract.Run` functions as the TUI.
 
 ### Key data flow
 
