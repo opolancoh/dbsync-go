@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -71,15 +72,24 @@ type analyzeDoneMsg struct {
 }
 
 type transferProgressMsg struct {
-	table   string
-	rows    int
-	skipped bool
-	err     error
+	table        string
+	rows         int
+	conflictRows int
+	skipped      bool
+	err          error
+}
+
+type rowErrorEntry struct {
+	timestamp time.Time
+	table     string
+	row       map[string]any
+	err       error
 }
 
 type transferDoneMsg struct {
-	summary *transfer.Summary
-	logPath string
+	summary      *transfer.Summary
+	logPath      string
+	errorLogPath string
 }
 
 type connTestDoneMsg struct{ err error }
@@ -117,15 +127,17 @@ type Model struct {
 	srcAdapter adapters.DBAdapter
 
 	// step results
-	backupDir string
-	schema    *inspect.Schema
-	manifest  *extract.Summary
-	mapping   *compare.Mapping
-	summary   *transfer.Summary
-	logPath   string
+	backupDir    string
+	schema       *inspect.Schema
+	manifest     *extract.Summary
+	mapping      *compare.Mapping
+	summary      *transfer.Summary
+	logPath      string
+	errorLogPath string
 
 	// reorder cursor: index into mapping.Tables on the compare screen
-	cursor int
+	cursor           int
+	conflictStrategy transfer.ConflictStrategy
 
 	// streaming progress
 	progressCh       <-chan tea.Msg
@@ -208,6 +220,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logs = nil
 				m.summary = nil
 				m.logPath = ""
+				m.errorLogPath = ""
 				m.transferProgress = nil
 				return m, nil
 			}
@@ -231,6 +244,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.step == stepAnalyze && m.mapping != nil && !m.running && m.cursor < len(m.mapping.Tables)-1 {
 				m.cursor++
+			}
+		case "c":
+			if m.step == stepAnalyze && !m.running {
+				m.conflictStrategy = (m.conflictStrategy + 1) % 3
 			}
 		case "+":
 			if m.step == stepAnalyze && m.mapping != nil && !m.running && m.cursor > 0 {
@@ -308,6 +325,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case transferDoneMsg:
 		m.summary = msg.summary
 		m.logPath = msg.logPath
+		m.errorLogPath = msg.errorLogPath
 		m.running = false
 		m.step = stepDone
 		m.closeAdapters()
@@ -436,11 +454,21 @@ func (m Model) advance() (tea.Model, tea.Cmd) {
 			}
 			defer tgtAdapter.Close(ctx)
 
+			var rowErrors []rowErrorEntry
 			opts := transfer.Options{
-				ChunkSize:   500,
-				NoInterrupt: true,
-				OnProgress: func(table string, rows int, skipped bool, err error) {
-					ch <- transferProgressMsg{table: table, rows: rows, skipped: skipped, err: err}
+				ConflictStrategy: m.conflictStrategy,
+				ChunkSize:        500,
+				NoInterrupt:      true,
+				OnProgress: func(table string, rows int, conflictRows int, skipped bool, err error) {
+					ch <- transferProgressMsg{table: table, rows: rows, conflictRows: conflictRows, skipped: skipped, err: err}
+				},
+				OnRowError: func(table string, row map[string]any, err error) {
+					rowErrors = append(rowErrors, rowErrorEntry{
+						timestamp: time.Now().UTC(),
+						table:     table,
+						row:       row,
+						err:       err,
+					})
 				},
 			}
 			summary, err := transfer.Run(ctx, tgtAdapter, mapping, extractDir, opts)
@@ -449,8 +477,10 @@ func (m Model) advance() (tea.Model, tea.Cmd) {
 				close(ch)
 				return
 			}
-			logPath := writeTransferLog(summary, filepath.Join(backupDir, "04-transfer"))
-			ch <- transferDoneMsg{summary: summary, logPath: logPath}
+			transferDir := filepath.Join(backupDir, "04-transfer")
+			logPath := writeTransferLog(summary, transferDir)
+			errorLogPath := writeErrorLog(rowErrors, transferDir)
+			ch <- transferDoneMsg{summary: summary, logPath: logPath, errorLogPath: errorLogPath}
 			close(ch)
 		}()
 		return m, listenForProgress(m.progressCh)
@@ -765,9 +795,29 @@ func (m Model) viewCompare() string {
 			}
 		}
 		b.WriteString("\n")
+
+		var strategyLabel, strategyDesc string
+		switch m.conflictStrategy {
+		case transfer.ConflictUpsert:
+			strategyLabel = "upsert"
+			strategyDesc = "overwrite existing rows with source data"
+		case transfer.ConflictTruncate:
+			strategyLabel = "truncate"
+			strategyDesc = "delete all target rows before inserting"
+		default:
+			strategyLabel = "skip"
+			strategyDesc = "silently skip rows that already exist"
+		}
+		b.WriteString(fmt.Sprintf("  %-16s %s — %s\n", "Conflict:", strategyLabel, strategyDesc))
+		if m.conflictStrategy == transfer.ConflictTruncate {
+			b.WriteString(warnStyle.Render("  ⚠ All existing rows will be deleted from each target table before inserting.") + "\n")
+		}
+		b.WriteString("\n")
+
 		b.WriteString(helpStyle.Render("  Reorder tables to satisfy foreign key dependencies before transferring.") + "\n\n")
 		b.WriteString(helpStyle.Render("  [↑↓] select") + "\n")
 		b.WriteString(helpStyle.Render("  [+/-] reorder") + "\n")
+		b.WriteString(helpStyle.Render("  [c] conflict: skip → upsert → truncate") + "\n")
 		b.WriteString(helpStyle.Render("  [enter] start transfer") + "\n")
 		b.WriteString(helpStyle.Render("  [q] quit") + "\n")
 	}
@@ -787,6 +837,9 @@ func (m Model) viewTransfer() string {
 			case done && prog.err != nil:
 				icon = errStyle.Render("✗")
 				detail = errStyle.Render(prog.err.Error())
+			case done && prog.conflictRows > 0:
+				icon = warnStyle.Render("⚠")
+				detail = warnStyle.Render(fmt.Sprintf("%d rows  (%d silently skipped)", prog.rows, prog.conflictRows))
 			case done:
 				icon = successStyle.Render("✓")
 				detail = successStyle.Render(fmt.Sprintf("%d rows", prog.rows))
@@ -821,10 +874,14 @@ func (m Model) viewDone() string {
 		for _, t := range toTransfer {
 			prog := m.transferProgress[t.Source]
 			var icon, detail string
-			if prog.err != nil {
+			switch {
+			case prog.err != nil:
 				icon = errStyle.Render("✗")
 				detail = errStyle.Render(prog.err.Error())
-			} else {
+			case prog.conflictRows > 0:
+				icon = warnStyle.Render("⚠")
+				detail = warnStyle.Render(fmt.Sprintf("%d rows  (%d silently skipped)", prog.rows, prog.conflictRows))
+			default:
 				icon = successStyle.Render("✓")
 				detail = successStyle.Render(fmt.Sprintf("%d rows", prog.rows))
 			}
@@ -840,7 +897,7 @@ func (m Model) viewDone() string {
 		b.WriteString("\n")
 	}
 
-	transferred, skipped, failed, totalRows := 0, 0, 0, 0
+	transferred, skipped, failed, totalRows, totalConflict := 0, 0, 0, 0, 0
 	if m.summary != nil {
 		for _, t := range m.summary.Tables {
 			switch {
@@ -851,6 +908,7 @@ func (m Model) viewDone() string {
 			default:
 				transferred++
 				totalRows += t.Rows
+				totalConflict += t.ConflictRows
 			}
 		}
 	}
@@ -865,6 +923,9 @@ func (m Model) viewDone() string {
 	}
 	b.WriteString(fmt.Sprintf("  %-20s %d\n", "Tables transferred:", transferred))
 	b.WriteString(fmt.Sprintf("  %-20s %d\n", "Rows transferred:", totalRows))
+	if totalConflict > 0 {
+		b.WriteString(warnStyle.Render(fmt.Sprintf("  %-20s %d (already existed, skipped)", "Rows skipped:", totalConflict)) + "\n")
+	}
 	if skipped > 0 {
 		b.WriteString(dimStyle.Render(fmt.Sprintf("  %-20s %d", "Tables skipped:", skipped)) + "\n")
 	}
@@ -874,8 +935,12 @@ func (m Model) viewDone() string {
 	b.WriteString("\n")
 	b.WriteString(successStyle.Render("  ✓ Done") + "\n\n")
 	if m.logPath != "" {
-		b.WriteString(dimStyle.Render("  Log: "+m.logPath) + "\n")
+		b.WriteString(dimStyle.Render("  Log:       "+m.logPath) + "\n")
 	}
+	if m.errorLogPath != "" {
+		b.WriteString(errStyle.Render("  Error log: "+m.errorLogPath) + "\n")
+	}
+	b.WriteString("\n")
 	b.WriteString(helpStyle.Render("  [r] retry transfer") + "\n")
 	b.WriteString(helpStyle.Render("  [enter] / [q] exit") + "\n")
 
@@ -897,7 +962,8 @@ func writeTransferLog(summary *transfer.Summary, dir string) string {
 
 	fmt.Fprintf(f, "Transfer Log\n")
 	fmt.Fprintf(f, "============\n")
-	fmt.Fprintf(f, "Transferred at: %s\n\n", summary.TransferredAt)
+	fmt.Fprintf(f, "Transferred at:    %s\n", summary.TransferredAt)
+	fmt.Fprintf(f, "Conflict strategy: %s\n\n", summary.ConflictStrategy)
 
 	var ok, skipped, failed []transfer.TableResult
 	for _, t := range summary.Tables {
@@ -918,7 +984,30 @@ func writeTransferLog(summary *transfer.Summary, dir string) string {
 
 	fmt.Fprintf(f, "TRANSFERRED (%d tables, %d rows):\n", len(ok), totalRows)
 	for _, t := range ok {
-		fmt.Fprintf(f, "  ✓ %-40s %d rows\n", t.Name, t.Rows)
+		if t.ConflictRows > 0 {
+			fmt.Fprintf(f, "  ⚠ %-40s %d rows  (%d silently skipped — already existed)\n", t.Name, t.Rows, t.ConflictRows)
+		} else {
+			fmt.Fprintf(f, "  ✓ %-40s %d rows\n", t.Name, t.Rows)
+		}
+	}
+
+	var conflicted []transfer.TableResult
+	for _, t := range ok {
+		if t.ConflictRows > 0 {
+			conflicted = append(conflicted, t)
+		}
+	}
+	if len(conflicted) > 0 {
+		totalConflict := 0
+		for _, t := range conflicted {
+			totalConflict += t.ConflictRows
+		}
+		fmt.Fprintf(f, "\nSILENTLY SKIPPED ROWS (%d rows across %d tables):\n", totalConflict, len(conflicted))
+		fmt.Fprintf(f, "  Cause: ON CONFLICT DO NOTHING — row already exists in target or violates a unique constraint.\n")
+		fmt.Fprintf(f, "  These rows exist in the source but were not inserted. Check the target table to investigate.\n\n")
+		for _, t := range conflicted {
+			fmt.Fprintf(f, "  ⚠ %-40s %d rows skipped\n", t.Name, t.ConflictRows)
+		}
 	}
 
 	if len(skipped) > 0 {
@@ -933,6 +1022,34 @@ func writeTransferLog(summary *transfer.Summary, dir string) string {
 		for _, t := range failed {
 			fmt.Fprintf(f, "  ✗ %-40s %s\n", t.Name, t.Err)
 		}
+	}
+
+	return logPath
+}
+
+func writeErrorLog(entries []rowErrorEntry, dir string) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return ""
+	}
+	logPath := filepath.Join(dir, "transfer-errors.log")
+	f, err := os.Create(logPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	fmt.Fprintf(f, "Transfer Error Log\n")
+	fmt.Fprintf(f, "==================\n")
+	fmt.Fprintf(f, "Generated at: %s\n\n", time.Now().UTC().Format(time.RFC3339))
+
+	for _, e := range entries {
+		recordJSON, _ := json.Marshal(e.row)
+		fmt.Fprintf(f, "[%s] Table: %s\n", e.timestamp.Format(time.RFC3339), e.table)
+		fmt.Fprintf(f, "  Error:  %s\n", e.err)
+		fmt.Fprintf(f, "  Record: %s\n\n", recordJSON)
 	}
 
 	return logPath

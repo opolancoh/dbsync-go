@@ -26,12 +26,13 @@ type FieldMapping struct {
 }
 
 type TableMapping struct {
-	Source string         `yaml:"source"`
-	Target *string        `yaml:"target"`
-	Status string         `yaml:"status"`
-	Skip   bool           `yaml:"skip"`
-	Order  int            `yaml:"order"`
-	Fields []FieldMapping `yaml:"fields"`
+	Source     string         `yaml:"source"`
+	Target     *string        `yaml:"target"`
+	Status     string         `yaml:"status"`
+	Skip       bool           `yaml:"skip"`
+	Order      int            `yaml:"order"`
+	PrimaryKey []string       `yaml:"primary_key,omitempty"`
+	Fields     []FieldMapping `yaml:"fields"`
 }
 
 type Mapping struct {
@@ -74,8 +75,9 @@ func Run(ctx context.Context, adapter adapters.DBAdapter, schema *inspect.Schema
 		}
 
 		tableMapping := TableMapping{
-			Source: sourceTable.Name,
-			Order:  order,
+			Source:     sourceTable.Name,
+			Order:      order,
+			PrimaryKey: sourceTable.PrimaryKey,
 		}
 		order++
 

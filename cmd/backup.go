@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -39,36 +40,64 @@ func runBackup(cmd *cobra.Command, args []string) error {
 
 	ctx := context.Background()
 
+	dbName := dbNameFromConnStr(cfg.SourceConn)
+	host := hostFromConnStr(cfg.SourceConn)
+	startedAt := time.Now().UTC()
+	backupDir := filepath.Join(cfg.Output.Directory, startedAt.Format("2006-01-02T15-04-05Z")+"_"+dbName)
+
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		return fmt.Errorf("creating backup directory: %w", err)
+	}
+
+	logPath := filepath.Join(backupDir, "backup.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		return fmt.Errorf("creating log file: %w", err)
+	}
+	defer logFile.Close()
+
+	// write prints to both stdout and the log file simultaneously
+	write := func(format string, a ...any) {
+		msg := fmt.Sprintf(format, a...)
+		fmt.Print(msg)
+		fmt.Fprint(logFile, msg)
+	}
+
+	write("Backup Log\n")
+	write("==========\n")
+	write("Started at:  %s\n", startedAt.Format(time.RFC3339))
+	write("Source:      %s @ %s\n", dbName, host)
+	write("Output:      %s\n\n", backupDir)
+
 	adapter, err := adapters.NewPostgresAdapter(ctx, cfg.SourceConn)
 	if err != nil {
+		write("ERROR connecting to source: %s\n", err)
 		return fmt.Errorf("connecting to source: %w", err)
 	}
 	defer adapter.Close(ctx)
 
-	dbName := dbNameFromConnStr(cfg.SourceConn)
-	host := hostFromConnStr(cfg.SourceConn)
-	timestamp := time.Now().UTC().Format("2006-01-02T15-04-05Z")
-	backupDir := filepath.Join(cfg.Output.Directory, timestamp+"_"+dbName)
-
-	fmt.Printf("Source:  %s @ %s\n", dbName, host)
-	fmt.Printf("Output:  %s\n\n", backupDir)
-
-	fmt.Println("Inspecting schema...")
+	write("INSPECT\n")
 	schema, err := inspect.Run(ctx, adapter, cfg.Source.Engine, host, dbName, filepath.Join(backupDir, "01-inspect"), cfg.IgnoredTables)
 	if err != nil {
+		write("  ERROR: %s\n", err)
 		return fmt.Errorf("inspect: %w", err)
 	}
-	fmt.Printf("  %d tables found\n\n", len(schema.Tables))
+	write("  %d tables found\n", len(schema.Tables))
+	if len(cfg.IgnoredTables) > 0 {
+		write("  Ignored: %s\n", strings.Join(cfg.IgnoredTables, ", "))
+	}
+	write("\n")
 
-	fmt.Println("Extracting data...")
+	write("EXTRACT\n")
 	manifest, err := extract.Run(ctx, adapter, schema, filepath.Join(backupDir, "02-extract"), func(table string, rows int, skipped bool) {
 		if skipped {
-			fmt.Printf("  - %-40s no rows, skipped\n", table)
+			write("  - %-40s no rows, skipped\n", table)
 		} else {
-			fmt.Printf("  ✓ %-40s %d rows\n", table, rows)
+			write("  ✓ %-40s %d rows\n", table, rows)
 		}
 	})
 	if err != nil {
+		write("  ERROR: %s\n", err)
 		return fmt.Errorf("extract: %w", err)
 	}
 
@@ -77,12 +106,13 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		totalRows += t.Rows
 	}
 
-	fmt.Printf("\nDone.\n")
-	fmt.Printf("  Tables exported: %d (%d rows)\n", len(manifest.Tables), totalRows)
+	write("\nSUMMARY\n")
+	write("  Tables exported: %d (%d rows)\n", len(manifest.Tables), totalRows)
 	if len(manifest.SkippedTables) > 0 {
-		fmt.Printf("  Tables skipped:  %d (no rows)\n", len(manifest.SkippedTables))
+		write("  Tables skipped:  %d (no rows)\n", len(manifest.SkippedTables))
 	}
-	fmt.Printf("  Output:          %s\n", backupDir)
+	write("  Completed at:    %s\n", time.Now().UTC().Format(time.RFC3339))
+	write("  Log:             %s\n", logPath)
 
 	return nil
 }

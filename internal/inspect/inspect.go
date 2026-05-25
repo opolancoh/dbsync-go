@@ -18,8 +18,9 @@ type Field struct {
 }
 
 type Table struct {
-	Name   string  `yaml:"name"`
-	Fields []Field `yaml:"fields"`
+	Name       string   `yaml:"name"`
+	PrimaryKey []string `yaml:"primary_key,omitempty"`
+	Fields     []Field  `yaml:"fields"`
 }
 
 type Schema struct {
@@ -60,7 +61,12 @@ func Run(ctx context.Context, adapter adapters.DBAdapter, engine, host, database
 			return nil, fmt.Errorf("describing table %s: %w", tableName, err)
 		}
 
-		table := Table{Name: tableName}
+		pk, err := adapter.GetPrimaryKey(ctx, tableName)
+		if err != nil {
+			return nil, fmt.Errorf("getting primary key for %s: %w", tableName, err)
+		}
+
+		table := Table{Name: tableName, PrimaryKey: pk}
 		for _, col := range columns {
 			table.Fields = append(table.Fields, Field{
 				Name:     col.Name,
