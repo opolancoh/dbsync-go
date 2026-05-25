@@ -121,22 +121,35 @@ Connects to the target database and compares its schema against the source. Show
 
 **Reordering tables** — use `+` / `-` to move the selected table up or down before starting the transfer. This controls the transfer order, which matters when tables have foreign key dependencies. The order is saved back to `mapping.yaml` automatically when transfer starts.
 
+**Conflict strategy** — press `c` to cycle through how the transfer handles rows that already exist in the target:
+
+| Strategy  | Behavior                                                                 |
+|-----------|--------------------------------------------------------------------------|
+| `skip`    | `ON CONFLICT DO NOTHING` — existing rows are silently skipped (default)  |
+| `upsert`  | `ON CONFLICT (pk) DO UPDATE SET ...` — existing rows are overwritten     |
+| `truncate`| `TRUNCATE TABLE … CASCADE` before insert — all existing rows are deleted |
+
+The `truncate` strategy shows a warning because it deletes all rows in the target tables before inserting. Use it only when a full replacement is intended.
+
 Keys:
 
 ```
   [↑↓] select
   [+/-] reorder
+  [c] cycle conflict strategy
   [enter] start transfer
   [q] quit
 ```
 
 ### Transfer screen
 
-Inserts rows into the target database table by table. Each table shows live status (pending → row count or error). Inserts use `ON CONFLICT DO NOTHING`, so re-running is safe — existing rows are silently skipped.
+Inserts rows into the target database table by table, using the selected conflict strategy. Each table shows live status (pending → row count or error). When using `skip`, rows that already exist in the target are silently skipped and counted separately (shown as `⚠ X silently skipped`).
 
 ### Done screen
 
 Shows per-table results and a summary: source DB, target DB, tables transferred, rows transferred, tables skipped, and tables failed. A full log is written to `04-transfer/transfer.log`.
+
+If any rows failed (e.g. foreign key violations), the path to `transfer-errors.log` is shown in red. That file contains each failing row's timestamp, table name, error message, and the full JSON record.
 
 Keys:
 
@@ -166,6 +179,7 @@ backups/
       mapping.yaml
     04-transfer/
       transfer.log
+      transfer-errors.log   ← only written when row-level errors occur
 ```
 
 ### Editing `mapping.yaml`
@@ -185,6 +199,8 @@ tables:
     status: matched
     skip: false
     order: 1
+    primary_key:
+      - Id
     fields:
       - source: Id
         target: Id
@@ -197,8 +213,12 @@ tables:
     status: matched
     skip: true        # exclude this table from transfer
     order: 5
+    primary_key:
+      - Id
     fields: ...
 ```
+
+`primary_key` lists the source table's primary key columns. It is used by the `upsert` conflict strategy to build the `ON CONFLICT (pk) DO UPDATE SET ...` clause.
 
 ---
 
@@ -233,7 +253,7 @@ Done.
   Output:          ./backups/2026-05-25T02-00-00Z_mydb
 ```
 
-Each run creates a new timestamped directory with the same structure as the TUI workflow:
+Each run creates a new timestamped directory with the same structure as the TUI workflow, and a `backup.log` file alongside it:
 
 ```
 backups/
@@ -245,9 +265,10 @@ backups/
       Tenants.ndjson
       AspNetUsers.ndjson
       ...
+  2026-05-25T02-00-00Z_mydb_backup.log
 ```
 
-These files can be used directly as input for the TUI's compare and transfer steps.
+`backup.log` records the full run output (same text as stdout), timestamped. These files can be used directly as input for the TUI's compare and transfer steps.
 
 ---
 
