@@ -8,8 +8,24 @@ type Column struct {
 	Nullable bool
 }
 
+// SchemaInfo describes a schema discovered in the database.
+type SchemaInfo struct {
+	Name   string
+	Tables int
+}
+
+// ForeignKey is one dependency edge: Table holds a foreign key referencing
+// RefTable, so RefTable must be populated first. Both names are qualified.
+type ForeignKey struct {
+	Table    string
+	RefTable string
+}
+
+// Table names crossing this interface are schema-qualified ("app.users").
 type DBAdapter interface {
-	ListTables(ctx context.Context) ([]string, error)
+	ListSchemas(ctx context.Context) ([]SchemaInfo, error)
+	ListTables(ctx context.Context, schemas []string) ([]string, error)
+	ListForeignKeys(ctx context.Context, schemas []string) ([]ForeignKey, error)
 	DescribeTable(ctx context.Context, table string) ([]Column, error)
 	GetPrimaryKey(ctx context.Context, table string) ([]string, error)
 	ExportTable(ctx context.Context, table string, fn func(row map[string]any) error) error

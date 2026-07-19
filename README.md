@@ -50,6 +50,9 @@ cp config.yaml.example config.yaml
 ```yaml
 source:
   engine: postgres
+  schemas:
+    - auth
+    - app
 
 output:
   directory: ./backups
@@ -58,7 +61,24 @@ ignored_tables:
   - audit_logs
 ```
 
-`ignored_tables` lists tables excluded during `inspect`. Since they never appear in `schema.yaml`, they are absent from all subsequent steps automatically.
+`ignored_tables` lists tables excluded during `inspect`. Since they never appear in `schema.yaml`, they are absent from all subsequent steps automatically. An entry matches either a bare table name in any schema (`audit_logs`) or a qualified one (`app.audit_logs`).
+
+### Schemas
+
+`source.schemas` selects which schemas to migrate, and **the list order is the migration order** — put schemas whose tables are referenced by others first.
+
+You don't need to know the names up front. Leave the key out and dbsync includes every non-system schema alphabetically, printing what it found:
+
+```
+Schemas found in spenbify_1:
+  app                    7 tables   ✓ included (2)
+  auth                  12 tables   ✓ included (1)
+  early_access           2 tables   ✗ not in source.schemas
+```
+
+Copy the names you want into `source.schemas` and rerun. A name listed there that doesn't exist in the database is an error rather than a silent no-op.
+
+Table names are schema-qualified (`app.users`) everywhere downstream: in `schema.yaml`, in the NDJSON filenames, and in `mapping.yaml`. To send a table to a different schema on the target, edit its `target:` in `mapping.yaml` — `target: app.users` → `target: legacy.users`.
 
 ### 3. Run
 

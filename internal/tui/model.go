@@ -214,6 +214,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		case "r":
+			if m.step == stepInspect && !m.running {
+				return m.reloadAndInspect()
+			}
 			if m.step == stepDone {
 				m.step = stepAnalyze
 				m.running = false
@@ -399,6 +402,34 @@ func (m Model) submitConfig() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(m.spinner.Tick, m.cmdTestConnections())
 }
 
+// reloadAndInspect re-reads config.yaml and inspects again, so edits to
+// source.schemas (or ignored_tables) take effect without restarting the TUI.
+// Connection strings come from the Config screen, not the file, so they carry
+// over untouched.
+func (m Model) reloadAndInspect() (tea.Model, tea.Cmd) {
+	configPath := strings.TrimSpace(m.inputs[0].Value())
+	if configPath == "" {
+		configPath = "./config.yaml"
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		m.err = fmt.Errorf("loading config: %w", err)
+		return m, nil
+	}
+	cfg.SourceConn = m.cfg.SourceConn
+	cfg.TargetConn = m.cfg.TargetConn
+
+	// The previous inspect's adapter is replaced by a fresh one in cmdInspect.
+	m.closeAdapters()
+
+	m.cfg = cfg
+	m.schema = nil
+	m.err = nil
+	m.running = true
+	return m, tea.Batch(m.spinner.Tick, m.cmdInspect())
+}
+
 func (m Model) advance() (tea.Model, tea.Cmd) {
 	switch m.step {
 
@@ -504,7 +535,7 @@ func (m *Model) closeAdapters() {
 // ── Commands ─────────────────────────────────────────────────────────────────
 
 func (m Model) cmdInspect() tea.Cmd {
-	ctx, cfg := m.ctx, m.cfg
+	ctx, cfg, existingDir := m.ctx, m.cfg, m.backupDir
 	return func() tea.Msg {
 		adapter, err := adapters.NewPostgresAdapter(ctx, cfg.SourceConn)
 		if err != nil {
@@ -513,9 +544,15 @@ func (m Model) cmdInspect() tea.Cmd {
 
 		dbName, _ := dbNameFromConn(cfg.SourceConn)
 		host, _ := hostFromConn(cfg.SourceConn)
-		rootDir := filepath.Join(cfg.Output.Directory, time.Now().UTC().Format("2006-01-02T15-04-05Z")+"_"+dbName)
 
-		schema, err := inspect.Run(ctx, adapter, cfg.Source.Engine, host, dbName, filepath.Join(rootDir, "01-inspect"), cfg.IgnoredTables)
+		// A reload re-inspects into the folder already created for this run
+		// rather than leaving an abandoned one behind per attempt.
+		rootDir := existingDir
+		if rootDir == "" {
+			rootDir = filepath.Join(cfg.Output.Directory, time.Now().UTC().Format("2006-01-02T15-04-05Z")+"_"+dbName)
+		}
+
+		schema, err := inspect.Run(ctx, adapter, cfg.Source.Engine, host, dbName, filepath.Join(rootDir, "01-inspect"), cfg.IgnoredTables, cfg.Source.Schemas)
 		if err != nil {
 			adapter.Close(ctx)
 			return errMsg{fmt.Errorf("inspect: %w", err)}
@@ -584,6 +621,11 @@ func (m Model) View() string {
 
 	if m.err != nil && m.step != stepConfig {
 		b.WriteString(errStyle.Render("  ✗ "+m.err.Error()) + "\n\n")
+		// A failed inspect is usually a config problem, so offer the reload
+		// rather than forcing a restart to pick up an edit.
+		if m.step == stepInspect && !m.running {
+			b.WriteString(helpStyle.Render("  [r] reload config.yaml and inspect again") + "\n")
+		}
 		b.WriteString(helpStyle.Render("  [q] quit") + "\n")
 		return b.String()
 	}
@@ -647,6 +689,11 @@ func (m Model) viewConfig() string {
 		b.WriteString(dimStyle.Render("  From config.yaml") + "\n")
 		b.WriteString(dimStyle.Render(fmt.Sprintf("    %-16s %s", "Engine:", m.cfg.Source.Engine)) + "\n")
 		b.WriteString(dimStyle.Render(fmt.Sprintf("    %-16s %s", "Output dir:", m.cfg.Output.Directory)) + "\n")
+		if len(m.cfg.Source.Schemas) > 0 {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("    %-16s %s", "Schemas:", strings.Join(m.cfg.Source.Schemas, " → "))) + "\n")
+		} else {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("    %-16s %s", "Schemas:", "all (set source.schemas to choose and order)")) + "\n")
+		}
 		if len(m.cfg.IgnoredTables) > 0 {
 			b.WriteString(dimStyle.Render(fmt.Sprintf("    %-16s %s", "Ignored tables:", strings.Join(m.cfg.IgnoredTables, ", "))) + "\n")
 		}
@@ -691,11 +738,27 @@ func (m Model) viewInspect() string {
 	}
 
 	if m.schema != nil {
+		b.WriteString(fmt.Sprintf("  Schemas found in %s:\n", m.schema.Database))
+		for _, s := range m.schema.Schemas {
+			switch {
+			case s.Included:
+				b.WriteString(fmt.Sprintf("    %-20s %3d tables   ✓ will migrate (order %d)\n", s.Name, s.Tables, s.Order))
+			case s.Tables == 0:
+				// Nothing is being left behind, so this is not a skip worth acting on.
+				b.WriteString(dimStyle.Render(fmt.Sprintf("    %-20s %3d tables   · empty, nothing to migrate", s.Name, s.Tables)) + "\n")
+			default:
+				b.WriteString(dimStyle.Render(fmt.Sprintf("    %-20s %3d tables   ✗ will be SKIPPED (not in source.schemas)", s.Name, s.Tables)) + "\n")
+			}
+		}
+		b.WriteString(helpStyle.Render("    Edit source.schemas in config.yaml to choose schemas and their order, then press [r]") + "\n")
+		b.WriteString("\n")
+
 		for _, t := range m.schema.Tables {
 			b.WriteString(dimStyle.Render(fmt.Sprintf("    %-35s %d fields", t.Name, len(t.Fields))) + "\n")
 		}
 		b.WriteString("\n")
 		b.WriteString(helpStyle.Render("  [enter] start extract") + "\n")
+		b.WriteString(helpStyle.Render("  [r] reload config.yaml and inspect again") + "\n")
 		b.WriteString(helpStyle.Render("  [q] quit") + "\n")
 	}
 
@@ -760,6 +823,12 @@ func (m Model) viewCompare() string {
 			b.WriteString(warnStyle.Render(fmt.Sprintf("  %-16s %d — will be skipped", "Unmatched:", unmatched)) + "\n")
 		} else {
 			b.WriteString(dimStyle.Render(fmt.Sprintf("  %-16s %d", "Unmatched:", unmatched)) + "\n")
+		}
+		b.WriteString(dimStyle.Render(fmt.Sprintf("  %-16s %s", "Order:", "by foreign keys — referenced tables first")) + "\n")
+		if len(m.mapping.OrderingCycles) > 0 {
+			// No order satisfies a cycle, so the user has to intervene.
+			b.WriteString(warnStyle.Render(fmt.Sprintf("  %-16s %s", "FK cycle:", strings.Join(m.mapping.OrderingCycles, ", "))) + "\n")
+			b.WriteString(warnStyle.Render("                   order chosen arbitrarily — reorder with [+]/[-] if it fails") + "\n")
 		}
 		b.WriteString("\n")
 	}

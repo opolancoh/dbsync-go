@@ -7,7 +7,7 @@ import (
 )
 
 var tuiCmd = &cobra.Command{
-	Use:   "ui",
+	Use:   "tui",
 	Short: "Interactive terminal UI for the full migration workflow",
 	RunE:  runTUI,
 }

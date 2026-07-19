@@ -21,14 +21,69 @@ func NewPostgresAdapter(ctx context.Context, connString string) (*PostgresAdapte
 	return &PostgresAdapter{conn: conn}, nil
 }
 
-func (a *PostgresAdapter) ListTables(ctx context.Context) ([]string, error) {
+// splitQualified splits "app.users" into its schema and table parts. A name
+// without a dot is assumed to live in the public schema.
+func splitQualified(name string) (schema, table string) {
+	if i := strings.IndexByte(name, '.'); i >= 0 {
+		return name[:i], name[i+1:]
+	}
+	return "public", name
+}
+
+// quoteQualified renders "app.users" as "app"."users". Applying %q to the whole
+// string instead would yield a single identifier literally named `app.users`.
+func quoteQualified(name string) string {
+	schema, table := splitQualified(name)
+	return fmt.Sprintf("%q.%q", schema, table)
+}
+
+func (a *PostgresAdapter) ListSchemas(ctx context.Context) ([]SchemaInfo, error) {
+	// Driven from pg_namespace, not information_schema.tables, so that schemas
+	// holding no tables (an untouched `public`, say) are still reported rather
+	// than silently absent. The count comes from information_schema so it stays
+	// consistent with ListTables, which is privilege-filtered the same way.
 	rows, err := a.conn.Query(ctx, `
-		SELECT table_name
-		FROM information_schema.tables
-		WHERE table_schema = 'public'
-		  AND table_type = 'BASE TABLE'
-		ORDER BY table_name
+		SELECT n.nspname, count(t.table_name)
+		FROM pg_namespace n
+		LEFT JOIN information_schema.tables t
+		       ON t.table_schema = n.nspname
+		      AND t.table_type   = 'BASE TABLE'
+		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND n.nspname NOT LIKE 'pg_toast%'
+		  AND n.nspname NOT LIKE 'pg_temp%'
+		  AND n.nspname NOT LIKE 'pg_toast_temp%'
+		GROUP BY n.nspname
+		ORDER BY n.nspname
 	`)
+	if err != nil {
+		return nil, fmt.Errorf("listing schemas: %w", err)
+	}
+	defer rows.Close()
+
+	var schemas []SchemaInfo
+	for rows.Next() {
+		var s SchemaInfo
+		if err := rows.Scan(&s.Name, &s.Tables); err != nil {
+			return nil, fmt.Errorf("scanning schema: %w", err)
+		}
+		schemas = append(schemas, s)
+	}
+	return schemas, rows.Err()
+}
+
+// ListTables returns schema-qualified names, ordered by the position of each
+// schema in the schemas argument so callers control migration order.
+func (a *PostgresAdapter) ListTables(ctx context.Context, schemas []string) ([]string, error) {
+	if len(schemas) == 0 {
+		return nil, nil
+	}
+	rows, err := a.conn.Query(ctx, `
+		SELECT table_schema, table_name
+		FROM information_schema.tables
+		WHERE table_schema = ANY($1)
+		  AND table_type = 'BASE TABLE'
+		ORDER BY array_position($1, table_schema), table_name
+	`, schemas)
 	if err != nil {
 		return nil, fmt.Errorf("listing tables: %w", err)
 	}
@@ -36,23 +91,60 @@ func (a *PostgresAdapter) ListTables(ctx context.Context) ([]string, error) {
 
 	var tables []string
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var schema, name string
+		if err := rows.Scan(&schema, &name); err != nil {
 			return nil, fmt.Errorf("scanning table name: %w", err)
 		}
-		tables = append(tables, name)
+		tables = append(tables, schema+"."+name)
 	}
 	return tables, rows.Err()
 }
 
+// ListForeignKeys returns one edge per foreign key between tables in the given
+// schemas. Self-references are omitted: they constrain row order within a table,
+// which table ordering cannot fix, and would otherwise register as a cycle.
+func (a *PostgresAdapter) ListForeignKeys(ctx context.Context, schemas []string) ([]ForeignKey, error) {
+	if len(schemas) == 0 {
+		return nil, nil
+	}
+	rows, err := a.conn.Query(ctx, `
+		SELECT cn.nspname || '.' || c.relname,
+		       pn.nspname || '.' || p.relname
+		FROM pg_constraint con
+		JOIN pg_class     c  ON c.oid  = con.conrelid
+		JOIN pg_namespace cn ON cn.oid = c.relnamespace
+		JOIN pg_class     p  ON p.oid  = con.confrelid
+		JOIN pg_namespace pn ON pn.oid = p.relnamespace
+		WHERE con.contype = 'f'
+		  AND cn.nspname = ANY($1)
+		  AND pn.nspname = ANY($1)
+		  AND c.oid <> p.oid
+	`, schemas)
+	if err != nil {
+		return nil, fmt.Errorf("listing foreign keys: %w", err)
+	}
+	defer rows.Close()
+
+	var fks []ForeignKey
+	for rows.Next() {
+		var fk ForeignKey
+		if err := rows.Scan(&fk.Table, &fk.RefTable); err != nil {
+			return nil, fmt.Errorf("scanning foreign key: %w", err)
+		}
+		fks = append(fks, fk)
+	}
+	return fks, rows.Err()
+}
+
 func (a *PostgresAdapter) DescribeTable(ctx context.Context, table string) ([]Column, error) {
+	schemaName, tableName := splitQualified(table)
 	rows, err := a.conn.Query(ctx, `
 		SELECT column_name, data_type, is_nullable
 		FROM information_schema.columns
-		WHERE table_schema = 'public'
-		  AND table_name = $1
+		WHERE table_schema = $1
+		  AND table_name = $2
 		ORDER BY ordinal_position
-	`, table)
+	`, schemaName, tableName)
 	if err != nil {
 		return nil, fmt.Errorf("describing table %s: %w", table, err)
 	}
@@ -74,7 +166,7 @@ func (a *PostgresAdapter) DescribeTable(ctx context.Context, table string) ([]Co
 }
 
 func (a *PostgresAdapter) ExportTable(ctx context.Context, table string, fn func(row map[string]any) error) error {
-	rows, err := a.conn.Query(ctx, fmt.Sprintf("SELECT * FROM %q", table))
+	rows, err := a.conn.Query(ctx, fmt.Sprintf("SELECT * FROM %s", quoteQualified(table)))
 	if err != nil {
 		return fmt.Errorf("querying table %s: %w", table, err)
 	}
@@ -139,8 +231,8 @@ func (a *PostgresAdapter) InsertRows(ctx context.Context, table string, rows []m
 		colIdents[i] = fmt.Sprintf("%q", col)
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 	}
-	sql := fmt.Sprintf("INSERT INTO %q (%s) VALUES (%s) ON CONFLICT DO NOTHING",
-		table,
+	sql := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT DO NOTHING",
+		quoteQualified(table),
 		strings.Join(colIdents, ", "),
 		strings.Join(placeholders, ", "))
 
@@ -167,6 +259,7 @@ func (a *PostgresAdapter) InsertRows(ctx context.Context, table string, rows []m
 }
 
 func (a *PostgresAdapter) GetPrimaryKey(ctx context.Context, table string) ([]string, error) {
+	schemaName, tableName := splitQualified(table)
 	rows, err := a.conn.Query(ctx, `
 		SELECT kcu.column_name
 		FROM information_schema.table_constraints tc
@@ -174,10 +267,10 @@ func (a *PostgresAdapter) GetPrimaryKey(ctx context.Context, table string) ([]st
 		    ON tc.constraint_name = kcu.constraint_name
 		   AND tc.table_schema    = kcu.table_schema
 		WHERE tc.constraint_type = 'PRIMARY KEY'
-		  AND tc.table_schema    = 'public'
-		  AND tc.table_name      = $1
+		  AND tc.table_schema    = $1
+		  AND tc.table_name      = $2
 		ORDER BY kcu.ordinal_position
-	`, table)
+	`, schemaName, tableName)
 	if err != nil {
 		return nil, fmt.Errorf("querying primary key for %s: %w", table, err)
 	}
@@ -230,8 +323,8 @@ func (a *PostgresAdapter) UpsertRows(ctx context.Context, table string, rows []m
 	}
 
 	sql := fmt.Sprintf(
-		"INSERT INTO %q (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s",
-		table,
+		"INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s",
+		quoteQualified(table),
 		strings.Join(colIdents, ", "),
 		strings.Join(placeholders, ", "),
 		strings.Join(pkIdents, ", "),
@@ -261,7 +354,7 @@ func (a *PostgresAdapter) UpsertRows(ctx context.Context, table string, rows []m
 }
 
 func (a *PostgresAdapter) TruncateTable(ctx context.Context, table string) error {
-	_, err := a.conn.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %q CASCADE", table))
+	_, err := a.conn.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", quoteQualified(table)))
 	return err
 }
 

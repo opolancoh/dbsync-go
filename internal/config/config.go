@@ -10,6 +10,9 @@ import (
 
 type Source struct {
 	Engine string `yaml:"engine"`
+	// Schemas selects which schemas to migrate, in migration order. Empty means
+	// every non-system schema, alphabetically.
+	Schemas []string `yaml:"schemas"`
 }
 
 type Output struct {

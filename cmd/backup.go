@@ -77,10 +77,31 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	defer adapter.Close(ctx)
 
 	write("INSPECT\n")
-	schema, err := inspect.Run(ctx, adapter, cfg.Source.Engine, host, dbName, filepath.Join(backupDir, "01-inspect"), cfg.IgnoredTables)
+	schema, err := inspect.Run(ctx, adapter, cfg.Source.Engine, host, dbName, filepath.Join(backupDir, "01-inspect"), cfg.IgnoredTables, cfg.Source.Schemas)
 	if err != nil {
 		write("  ERROR: %s\n", err)
 		return fmt.Errorf("inspect: %w", err)
+	}
+
+	write("  Schemas found in %s:\n", dbName)
+	skippedSchemas := 0
+	for _, s := range schema.Schemas {
+		switch {
+		case s.Included:
+			write("    %-20s %3d tables   will migrate (order %d)\n", s.Name, s.Tables, s.Order)
+		case s.Tables == 0:
+			// Nothing is being left behind, so this is not a skip worth acting on.
+			write("    %-20s %3d tables   empty, nothing to migrate\n", s.Name, s.Tables)
+		default:
+			skippedSchemas++
+			write("    %-20s %3d tables   WILL BE SKIPPED (not in source.schemas)\n", s.Name, s.Tables)
+		}
+	}
+	if skippedSchemas > 0 {
+		write("  %d schema(s) will be skipped; add them to source.schemas in config.yaml to include them\n", skippedSchemas)
+	}
+	if len(cfg.Source.Schemas) == 0 {
+		write("  (all schemas included; set source.schemas in config.yaml to choose and order them)\n")
 	}
 	write("  %d tables found\n", len(schema.Tables))
 	if len(cfg.IgnoredTables) > 0 {

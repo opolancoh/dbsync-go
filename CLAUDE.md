@@ -21,7 +21,11 @@ GOOS=darwin  GOARCH=arm64 go build -o bin/dbsync-mac    ./cmd
 GOOS=windows GOARCH=amd64 go build -o bin/dbsync.exe    ./cmd
 ```
 
-There are no tests in this project currently.
+```bash
+go test ./...
+```
+
+The only tests cover `orderTables` in `internal/compare/compare_test.go`.
 
 ## Architecture
 
@@ -58,9 +62,9 @@ Non-interactive command that runs inspect + extract sequentially and prints prog
 
 ### Key data flow
 
-- `inspect.Schema` → serialized to `01-inspect/schema.yaml`; includes `PrimaryKey []string` per table, captured via `adapter.GetPrimaryKey`
+- `inspect.Schema` → serialized to `01-inspect/schema.yaml`; includes `PrimaryKey []string` per table, captured via `adapter.GetPrimaryKey`, and `Schemas []SchemaEntry` recording every discovered schema with its inclusion and order
 - `extract.Summary` → serialized to `02-extract/extract-manifest.yaml`; skipped tables (no rows) are recorded here so `compare` auto-excludes them
-- `compare.Mapping` → serialized to `03-compare/mapping.yaml`; `PrimaryKey` propagated from source schema; the TUI reorder (`+`/`-` keys) updates `Order` fields and calls `compare.Save()` before transfer starts; intended to be hand-edited (set `skip: true`, remap `target` names)
+- `compare.Mapping` → serialized to `03-compare/mapping.yaml`; table `Order` is assigned by `orderTables`, a foreign-key topological sort (see below); `PrimaryKey` propagated from source schema; the TUI reorder (`+`/`-` keys) updates `Order` fields and calls `compare.Save()` before transfer starts; intended to be hand-edited (set `skip: true`, remap `target` names)
 - `transfer` reads `mapping.yaml` + `*.ndjson`, inserts via `DBAdapter` using the selected conflict strategy (skip / upsert / truncate); writes `04-transfer/transfer.log`; if any rows fail, writes `04-transfer/transfer-errors.log` with per-row JSON records and error details
 
 ### TUI (internal/tui/model.go)
@@ -76,6 +80,7 @@ Key behaviors:
 - `m.transferProgress map[string]transferProgressMsg` tracks per-table live status during transfer; `conflictRows` field counts silently skipped rows (shown as `⚠ X silently skipped`)
 - `m.conflictStrategy transfer.ConflictStrategy` — cycled with `[c]` on the Compare screen; passed to `transfer.Options.ConflictStrategy` when transfer starts
 - `rowErrorEntry` structs collect per-row failures during transfer; written to `transfer-errors.log` by `writeErrorLog`
+- `r` on the Inspect screen calls `reloadAndInspect`: re-reads `config.yaml` from the path in `m.inputs[0]` and re-runs inspect, so `source.schemas` / `ignored_tables` edits apply without restarting. Connection strings are preserved from `m.cfg` since they come from the Config screen, not the file. `cmdInspect` reuses a non-empty `m.backupDir` instead of minting a new timestamped folder, so repeated reloads don't litter the output directory. Available from the inspect error screen too — a failed inspect is usually a config problem
 - Retry (`r` key on done screen) returns to `stepAnalyze` with `m.transferProgress`, `m.errorLogPath`, and `m.summary` cleared
 
 ### DBAdapter interface
@@ -90,7 +95,24 @@ Key methods:
 
 ### Configuration
 
-`config.yaml` sets `source.engine`, `output.directory`, and `ignored_tables`. Connection strings are entered directly in the TUI and are never stored in config files.
+`config.yaml` sets `source.engine`, `source.schemas`, `output.directory`, and `ignored_tables`. Connection strings are entered directly in the TUI and are never stored in config files.
+
+### Multi-schema support
+
+Table names are **schema-qualified strings** (`app.users`) at every layer: the `DBAdapter` interface, `schema.yaml`, NDJSON filenames, and `mapping.yaml`. There is no separate schema field — remapping a table to another target schema means editing `target:` in `mapping.yaml`.
+
+- `source.schemas` in config selects schemas *and* their migration order; empty means all non-system schemas alphabetically
+- `adapter.ListSchemas` discovers every non-system schema with its table count; `inspect.ResolveSchemas` marks which are included and assigns `Order`
+- `ListSchemas` drives off `pg_namespace` LEFT JOINed to `information_schema.tables`, **not** a `GROUP BY` over `information_schema.tables` alone — the latter omits table-less schemas entirely, so an empty `public` would neither be reported as skipped nor be findable by `ResolveSchemas` (making `schemas: [public]` a spurious "not present in the database" error). Counts still come from `information_schema` to stay privilege-consistent with `ListTables`
+- Schemas with zero tables report as "empty, nothing to migrate" rather than as a skip, and are excluded from the "N schema(s) will be skipped" nudge — there is nothing to act on
+- The full discovered list is recorded in `schema.yaml` under `schemas:` (included or not) and reported by both the TUI inspect screen and `backup` stdout
+- `adapter.ListTables(ctx, schemas)` returns qualified names ordered by `array_position` over the schemas argument, so config order flows through to `compare`'s `Order` fields and then to transfer
+- A schema named in `source.schemas` but absent from the DB is a hard error from `inspect.Run`
+
+**Empty-source guards** — the pipeline stops rather than advancing with nothing to do. `inspect.Run` errors when the selected schemas hold no tables, or when `ignored_tables` excluded every one (the two cases have distinct messages); `compare.Run` errors when every source table was empty at extract time, which would make transfer a silent no-op. `schema.yaml` is written *before* the inspect check fires, so the discovered-schema list is still on disk to diagnose from. In the TUI these surface as `errMsg`, which sets `m.err` without advancing `m.step`; in `backup` they exit 1.
+- `ignored_tables` entries match either the qualified name or the bare table name in any schema (an EF Core `__EFMigrationsHistory` in several schemas is excluded from all of them by one bare entry)
+
+**Postgres identifier quoting:** `quoteQualified` in `adapters/postgres.go` renders `app.users` as `"app"."users"`. Never use `%q` directly on a table name — it produces a single identifier literally named `app.users`. All of `ExportTable`, `InsertRows`, `UpsertRows`, and `TruncateTable` go through this helper.
 
 ### Transfer conflict strategies
 
@@ -101,6 +123,17 @@ Key methods:
 - `ConflictTruncate` — calls `TruncateTable` before calling `InsertRows`; irreversible, shown with a warning in the TUI
 
 After a batch insert failure, `identifyRowErrors` retries each row individually to identify the specific failing record and fires `opts.OnRowError`.
+
+### Table ordering (compare/compare.go)
+
+`orderTables` assigns `Order` by topologically sorting on foreign keys, so a referenced table is transferred before the table referencing it. Without it, tables load in schema-then-alphabetical order, which breaks on FK dependencies — `TransactionTags` sorts before `Transactions` (uppercase `T` < lowercase `s`) and fails with SQLSTATE 23503.
+
+- Edges come from `adapter.ListForeignKeys` on the **target** DB, since that's where constraints are enforced at insert time; they are keyed on target table names, so a hand-edited `target:` remains consistent
+- Kahn's algorithm picking the *earliest ready* table each round, so the incoming sequence (config schema order, then table name) survives wherever FKs don't dictate otherwise
+- A cross-schema FK overrides config schema order — correctness wins over the configured preference
+- Self-referencing FKs are excluded in the SQL: they constrain row order *within* a table, which table ordering cannot fix, and would otherwise look like a cycle
+- Genuine cycles are broken by taking the earliest remaining table, recorded in `Mapping.OrderingCycles`, surfaced on the TUI compare screen, and left for the user to resolve with `+`/`-`
+- `internal/compare/compare_test.go` covers all of the above (the only tests in the project)
 
 ### Transfer field mapping
 

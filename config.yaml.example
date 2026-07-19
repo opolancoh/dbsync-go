@@ -1,8 +1,16 @@
 source:
   engine: postgres
 
+  # Schemas to migrate, in migration order (list order = transfer order).
+  # Omit or leave empty to include every non-system schema alphabetically.
+  # The first run prints the schemas it found, so you can fill this in after.
+  schemas:
+    - auth
+    - app
+
 output:
   directory: ./backups
 
+# Matches either a bare table name (any schema) or a qualified one (app.users).
 ignored_tables:
   - audit_logs
